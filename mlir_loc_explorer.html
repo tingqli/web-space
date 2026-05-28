@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MLIR Loc 对照查看器</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a3040;
+      --text: #e6e8ef;
+      --muted: #a2a9ba;
+      --hover: #293149;
+      --active: #2d4f8a;
+      --active-peer: #2f3f63;
+      --active-var-ref: #5a3e17;
+      --accent: #7cb8ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      color: var(--text);
+      background: var(--bg);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #10131a;
+      flex-wrap: wrap;
+    }
+
+    .toolbar label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    button,
+    select {
+      background: #1a2030;
+      color: var(--text);
+      border: 1px solid #34405a;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+
+    button:hover,
+    select:hover {
+      border-color: #4f6288;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .progress-wrap {
+      display: none;
+      width: 280px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .progress-wrap.show {
+      display: inline-flex;
+    }
+
+    .progress-wrap progress {
+      width: 170px;
+      height: 10px;
+    }
+
+    .progress-text {
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 92px;
+    }
+
+    .panes {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+    }
+
+    .pane {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .pane-title {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--accent);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .viewer {
+      flex: 1;
+      overflow: auto;
+      padding: 8px 0;
+    }
+
+    .line {
+      display: grid;
+      grid-template-columns: 56px auto;
+      align-items: baseline;
+      white-space: pre;
+      line-height: 1.35;
+      min-width: 100%;
+      width: max-content;
+    }
+
+    .line:hover {
+      background: var(--hover);
+    }
+
+    .line-no {
+      color: #74809a;
+      text-align: right;
+      padding-right: 10px;
+      user-select: none;
+    }
+
+    .line-code {
+      padding-right: 8px;
+      overflow: visible;
+    }
+
+    .line.active {
+      background: var(--active);
+    }
+
+    .line.peer-active {
+      background: var(--active-peer);
+    }
+
+    .line.var-ref-active {
+      background: var(--active-var-ref);
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="pickDirBtn">选择目录</button>
+    <button id="importDirBtn">导入目录(兼容)</button>
+    <input id="dirInput" type="file" webkitdirectory directory multiple hidden>
+
+    <label for="leftFileSelect">左侧文件</label>
+    <select id="leftFileSelect"></select>
+
+    <label for="rightFileSelect">右侧文件</label>
+    <select id="rightFileSelect"></select>
+
+    <span id="progressWrap" class="progress-wrap">
+      <progress id="loadProgress" value="0" max="100"></progress>
+      <span id="progressText" class="progress-text">0%</span>
+    </span>
+
+    <span id="status" class="hint">先点击“选择目录”，选择含 mlir 文件的目录。鼠标悬停联动，单击可锁定。</span>
+  </div>
+
+  <div class="panes">
+    <section class="pane">
+      <div id="leftTitle" class="pane-title">左侧</div>
+      <div id="leftViewer" class="viewer"></div>
+    </section>
+    <section class="pane">
+      <div id="rightTitle" class="pane-title">右侧</div>
+      <div id="rightViewer" class="viewer"></div>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      files: [],
+      fileTextByName: new Map(),
+      parsedByFile: new Map(),
+      hover: null,
+      locked: null,
+      leftData: null,
+      rightData: null,
+    };
+
+    const pickDirBtn = document.getElementById("pickDirBtn");
+    const importDirBtn = document.getElementById("importDirBtn");
+    const dirInput = document.getElementById("dirInput");
+    const leftSelect = document.getElementById("leftFileSelect");
+    const rightSelect = document.getElementById("rightFileSelect");
+    const leftViewer = document.getElementById("leftViewer");
+    const rightViewer = document.getElementById("rightViewer");
+    const leftTitle = document.getElementById("leftTitle");
+    const rightTitle = document.getElementById("rightTitle");
+    const statusEl = document.getElementById("status");
+    const progressWrap = document.getElementById("progressWrap");
+    const loadProgress = document.getElementById("loadProgress");
+    const progressText = document.getElementById("progressText");
+
+    pickDirBtn.addEventListener("click", pickDirectory);
+    importDirBtn.addEventListener("click", () => dirInput.click());
+    dirInput.addEventListener("change", importDirectoryCompat);
+    leftSelect.addEventListener("change", renderBoth);
+    rightSelect.addEventListener("change", renderBoth);
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function setLoading(disabled) {
+      pickDirBtn.disabled = disabled;
+      importDirBtn.disabled = disabled;
+      leftSelect.disabled = disabled;
+      rightSelect.disabled = disabled;
+    }
+
+    function updateProgress(done, total, label = "") {
+      const safeTotal = total > 0 ? total : 1;
+      const percent = Math.min(100, Math.round((done / safeTotal) * 100));
+      loadProgress.max = safeTotal;
+      loadProgress.value = Math.min(done, safeTotal);
+      progressText.textContent = label ? `${label} ${percent}%` : `${percent}%`;
+    }
+
+    function showProgress(total, label = "加载中") {
+      progressWrap.classList.add("show");
+      updateProgress(0, total, label);
+      setLoading(true);
+    }
+
+    function hideProgress() {
+      progressWrap.classList.remove("show");
+      setLoading(false);
+    }
+
+    async function pickDirectory() {
+      if (!window.showDirectoryPicker) {
+        setStatus("当前浏览器不支持 showDirectoryPicker，可改用“导入目录(兼容)”。");
+        return;
+      }
+
+      try {
+        const dirHandle = await window.showDirectoryPicker();
+        const entries = [];
+        for await (const entry of dirHandle.values()) {
+          if (entry.kind === "file" && entry.name.toLowerCase().endsWith(".mlir")) {
+            entries.push(entry);
+          }
+        }
+
+        const files = [];
+        const fileTextByName = new Map();
+        showProgress(entries.length, "读取");
+
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i];
+          files.push(entry.name);
+          const f = await entry.getFile();
+          fileTextByName.set(entry.name, await f.text());
+          updateProgress(i + 1, entries.length, "读取");
+        }
+        files.sort();
+        state.files = files;
+        state.fileTextByName = fileTextByName;
+        state.parsedByFile.clear();
+
+        if (files.length === 0) {
+          fillSelect(leftSelect, []);
+          fillSelect(rightSelect, []);
+          leftViewer.innerHTML = "";
+          rightViewer.innerHTML = "";
+          setStatus("目录中没有 .mlir 文件。");
+          hideProgress();
+          return;
+        }
+
+        fillSelect(leftSelect, files, 0);
+        fillSelect(rightSelect, files, files.length > 1 ? 1 : 0);
+        await renderBoth();
+        setStatus(`已加载目录，共 ${files.length} 个 .mlir 文件。`);
+        hideProgress();
+      } catch (err) {
+        hideProgress();
+        if (err && err.name === "AbortError") {
+          setStatus("已取消选择目录。");
+          return;
+        }
+        setStatus(`选择目录失败: ${err}`);
+      }
+    }
+
+    async function importDirectoryCompat() {
+      const selected = Array.from(dirInput.files || []);
+      if (selected.length === 0) {
+        setStatus("未选择目录。");
+        return;
+      }
+
+      const mlirFiles = selected.filter((f) => f.name.toLowerCase().endsWith(".mlir"));
+      if (mlirFiles.length === 0) {
+        setStatus("所选目录中没有 .mlir 文件。");
+        return;
+      }
+
+      const fileTextByName = new Map();
+      const names = [];
+      showProgress(mlirFiles.length, "读取");
+      try {
+        for (const f of mlirFiles) {
+          names.push(f.name);
+          fileTextByName.set(f.name, await f.text());
+          updateProgress(names.length, mlirFiles.length, "读取");
+        }
+        names.sort();
+
+        state.files = names;
+        state.fileTextByName = fileTextByName;
+        state.parsedByFile.clear();
+
+        fillSelect(leftSelect, names, 0);
+        fillSelect(rightSelect, names, names.length > 1 ? 1 : 0);
+        await renderBoth();
+        setStatus(`已导入目录，共 ${names.length} 个 .mlir 文件。`);
+      } finally {
+        hideProgress();
+      }
+    }
+
+    function fillSelect(selectEl, files, selectedIdx = 0) {
+      selectEl.innerHTML = "";
+      files.forEach((name, idx) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        if (idx === selectedIdx) {
+          opt.selected = true;
+        }
+        selectEl.appendChild(opt);
+      });
+    }
+
+    async function getParsed(fileName) {
+      if (!fileName) {
+        return null;
+      }
+      if (state.parsedByFile.has(fileName)) {
+        return state.parsedByFile.get(fileName);
+      }
+      const text = state.fileTextByName.get(fileName);
+      if (typeof text !== "string") {
+        return null;
+      }
+      const parsed = parseMlir(text);
+      state.parsedByFile.set(fileName, parsed);
+      return parsed;
+    }
+
+    async function renderBoth() {
+      if (state.fileTextByName.size === 0) {
+        return;
+      }
+      const leftFile = leftSelect.value;
+      const rightFile = rightSelect.value;
+      const [leftData, rightData] = await Promise.all([getParsed(leftFile), getParsed(rightFile)]);
+
+      leftTitle.textContent = leftFile || "左侧";
+      rightTitle.textContent = rightFile || "右侧";
+
+      state.hover = null;
+      state.locked = null;
+      state.leftData = leftData;
+      state.rightData = rightData;
+      renderPane(leftViewer, leftData, "left", rightData);
+      renderPane(rightViewer, rightData, "right", leftData);
+    }
+
+    function parseMlir(text) {
+      const lines = text.replace(/\r\n/g, "\n").split("\n");
+
+      // #loc9 = loc("-":32:12)
+      // #loc36 = loc(fused[#loc16, #loc12])
+      // #loc3 = loc(unknown)
+      const defs = new Map();
+      const defLineRe = /^#(loc[0-9A-Za-z_]+)\s*=\s*loc\((.*)\)\s*$/;
+      const directLineRe = /^"(?:[^"\\]|\\.)*":(\d+):(\d+)$/;
+      const refRe = /#(loc[0-9A-Za-z_]+)/g;
+
+      for (const line of lines) {
+        const m = line.match(defLineRe);
+        if (!m) {
+          continue;
+        }
+        const id = m[1];
+        const raw = m[2].trim();
+        const item = { type: "other", line: null, refs: [] };
+
+        const dm = raw.match(directLineRe);
+        if (dm) {
+          item.type = "direct";
+          item.line = Number(dm[1]);
+        } else if (raw === "unknown") {
+          item.type = "unknown";
+        } else {
+          let rm;
+          refRe.lastIndex = 0;
+          while ((rm = refRe.exec(raw)) !== null) {
+            item.refs.push(rm[1]);
+          }
+          if (item.refs.length > 0) {
+            item.type = "refs";
+          }
+        }
+        defs.set(id, item);
+      }
+
+      function resolveLocLines(locId, visiting = new Set()) {
+        if (!locId || visiting.has(locId)) {
+          return new Set();
+        }
+        visiting.add(locId);
+        const def = defs.get(locId);
+        if (!def) {
+          return new Set();
+        }
+        if (def.type === "direct" && typeof def.line === "number") {
+          return new Set([def.line]);
+        }
+        if (def.type === "unknown") {
+          return new Set();
+        }
+        const out = new Set();
+        for (const ref of def.refs || []) {
+          const child = resolveLocLines(ref, new Set(visiting));
+          for (const lineNo of child) {
+            out.add(lineNo);
+          }
+        }
+        return out;
+      }
+
+      const codeLocRefRe = /loc\(#(loc[0-9A-Za-z_]+)\)/g;
+      const codeLocDirectRe = /loc\("([^"\\]|\\.)*":(\d+):(\d+)\)/g;
+      const lineToSourceLines = new Map();
+      const sourceLineToCodeLines = new Map();
+      const lineToDefinedVars = new Map();
+      const lineToUsedVars = new Map();
+
+      function normalizeDefToken(token) {
+        const t = token.trim();
+        const m = t.match(/^(%[-A-Za-z0-9.$_]+)(?::\d+)?$/);
+        return m ? m[1] : null;
+      }
+
+      function parseDefinedVars(line) {
+        const eqIdx = line.indexOf("=");
+        if (eqIdx <= 0) {
+          return [];
+        }
+        const lhs = line.slice(0, eqIdx).trim();
+        if (!lhs.startsWith("%")) {
+          return [];
+        }
+        if (lhs.includes(",")) {
+          return lhs
+            .split(",")
+            .map((v) => normalizeDefToken(v))
+            .filter((v) => typeof v === "string");
+        }
+        const one = normalizeDefToken(lhs);
+        return one ? [one] : [];
+      }
+
+      function parseUsedVars(line) {
+        const out = new Set();
+        const useRe = /%[-A-Za-z0-9.$_]+(?:#[0-9]+)?/g;
+        let m;
+        useRe.lastIndex = 0;
+        while ((m = useRe.exec(line)) !== null) {
+          out.add(m[0]);
+        }
+        return out;
+      }
+
+      lines.forEach((line, idx) => {
+        const codeLineNo = idx + 1;
+        let rm;
+        const srcLines = new Set();
+        codeLocRefRe.lastIndex = 0;
+        while ((rm = codeLocRefRe.exec(line)) !== null) {
+          const locId = rm[1];
+          const resolved = resolveLocLines(locId);
+          for (const s of resolved) {
+            srcLines.add(s);
+          }
+        }
+        codeLocDirectRe.lastIndex = 0;
+        while ((rm = codeLocDirectRe.exec(line)) !== null) {
+          const srcLine = Number(rm[2]);
+          if (Number.isFinite(srcLine)) {
+            srcLines.add(srcLine);
+          }
+        }
+        lineToSourceLines.set(codeLineNo, srcLines);
+        for (const srcLineNo of srcLines) {
+          if (!sourceLineToCodeLines.has(srcLineNo)) {
+            sourceLineToCodeLines.set(srcLineNo, new Set());
+          }
+          sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
+        }
+
+        lineToDefinedVars.set(codeLineNo, parseDefinedVars(line));
+        lineToUsedVars.set(codeLineNo, parseUsedVars(line));
+      });
+
+      return {
+        lines,
+        lineToSourceLines,
+        sourceLineToCodeLines,
+        lineToDefinedVars,
+        lineToUsedVars,
+      };
+    }
+
+    function renderPane(container, parsed, side, peerParsed) {
+      container.innerHTML = "";
+      if (!parsed) {
+        return;
+      }
+      const frag = document.createDocumentFragment();
+
+      parsed.lines.forEach((code, idx) => {
+        const codeLineNo = idx + 1;
+        const row = document.createElement("div");
+        row.className = "line";
+        row.dataset.side = side;
+        row.dataset.lineNo = String(codeLineNo);
+
+        const no = document.createElement("span");
+        no.className = "line-no";
+        no.textContent = String(codeLineNo);
+
+        const text = document.createElement("span");
+        text.className = "line-code";
+        text.textContent = code.length === 0 ? " " : code;
+
+        row.appendChild(no);
+        row.appendChild(text);
+        frag.appendChild(row);
+
+        row.addEventListener("mouseenter", () => onHoverLine(side, codeLineNo, parsed, peerParsed));
+        row.addEventListener("click", () => onClickLine(side, codeLineNo, parsed, peerParsed));
+      });
+
+      container.appendChild(frag);
+      container.addEventListener("mouseleave", clearHover);
+    }
+
+    function onHoverLine(side, lineNo, parsed, peerParsed) {
+      if (state.locked) {
+        return;
+      }
+      state.hover = buildHighlightState(side, lineNo, parsed, peerParsed);
+      applyHighlight();
+    }
+
+    function onClickLine(side, lineNo, parsed, peerParsed) {
+      if (state.locked && state.locked.side === side && state.locked.lineNo === lineNo) {
+        state.locked = null;
+        state.hover = null;
+        applyHighlight();
+        setStatus("已取消锁定，恢复悬停联动。");
+        return;
+      }
+
+      state.locked = buildHighlightState(side, lineNo, parsed, peerParsed);
+      state.hover = null;
+      applyHighlight();
+      autoScrollToRightFirstMatch(side, lineNo, state.locked.srcLineSet);
+      setStatus("已锁定当前高亮；再次点击同一行可取消锁定。");
+    }
+
+    function clearHover() {
+      if (state.locked) {
+        return;
+      }
+      state.hover = null;
+      applyHighlight();
+    }
+
+    function applyHighlight() {
+      document.querySelectorAll(".line").forEach((el) => {
+        el.classList.remove("active", "peer-active", "var-ref-active");
+      });
+      const source = state.locked || state.hover;
+      if (!source) {
+        return;
+      }
+
+      const { side, lineNo, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
+      const ownSelector = `.line[data-side="${side}"][data-line-no="${lineNo}"]`;
+      const own = document.querySelector(ownSelector);
+      if (own) {
+        own.classList.add("active");
+      }
+
+      if (sameFileRefLines && sameFileRefLines.size > 0) {
+        sameFileRefLines.forEach((ln) => {
+          if (ln === lineNo) {
+            return;
+          }
+          const refSelector = `.line[data-side="${side}"][data-line-no="${ln}"]`;
+          const refLine = document.querySelector(refSelector);
+          if (refLine) {
+            refLine.classList.add("var-ref-active");
+          }
+        });
+      }
+
+      const peerSide = side === "left" ? "right" : "left";
+      peerLineSet.forEach((ln) => {
+        const peerSelector = `.line[data-side="${peerSide}"][data-line-no="${ln}"]`;
+        const peer = document.querySelector(peerSelector);
+        if (peer) {
+          peer.classList.add("peer-active");
+        }
+      });
+
+      if (peerVarRefLines && peerVarRefLines.size > 0) {
+        peerVarRefLines.forEach((ln) => {
+          const peerSelector = `.line[data-side="${peerSide}"][data-line-no="${ln}"]`;
+          const peer = document.querySelector(peerSelector);
+          if (peer) {
+            peer.classList.add("var-ref-active");
+          }
+        });
+      }
+    }
+
+    function collectSameFileRefLines(parsed, lineNo) {
+      if (!parsed) {
+        return new Set();
+      }
+      const defs = parsed.lineToDefinedVars.get(lineNo) || [];
+      return collectVarRefLinesForDefs(parsed, defs, new Set([lineNo]));
+    }
+
+    function collectVarRefLinesForDefs(parsed, defs, excludedLines = new Set()) {
+      const out = new Set();
+      if (!parsed || !defs || defs.length === 0) {
+        return out;
+      }
+
+      parsed.lines.forEach((_, idx) => {
+        const ln = idx + 1;
+        if (excludedLines.has(ln)) {
+          return;
+        }
+        const used = parsed.lineToUsedVars.get(ln);
+        if (!used || used.size === 0) {
+          return;
+        }
+        for (const defVar of defs) {
+          let hit = false;
+          for (const useVar of used) {
+            if (useVar === defVar || useVar.startsWith(defVar + "#")) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) {
+            out.add(ln);
+            break;
+          }
+        }
+      });
+      return out;
+    }
+
+    function buildHighlightState(side, lineNo, parsed, peerParsed) {
+      const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
+      const sameFileRefLines = collectSameFileRefLines(parsed, lineNo);
+      const peerLineSet = new Set();
+      const peerVarRefLines = new Set();
+
+      if (peerParsed && srcLineSet.size > 0) {
+        for (const srcLineNo of srcLineSet) {
+          const peerCodeLines = peerParsed.sourceLineToCodeLines.get(srcLineNo);
+          if (!peerCodeLines) {
+            continue;
+          }
+          for (const ln of peerCodeLines) {
+            peerLineSet.add(ln);
+          }
+        }
+
+        // 对侧仅定义 1 个 result 的匹配行，额外高亮其引用行。
+        for (const peerLineNo of peerLineSet) {
+          const defs = peerParsed.lineToDefinedVars.get(peerLineNo) || [];
+          if (defs.length !== 1) {
+            continue;
+          }
+          const refs = collectVarRefLinesForDefs(peerParsed, defs, peerLineSet);
+          for (const ln of refs) {
+            peerVarRefLines.add(ln);
+          }
+        }
+      }
+
+      return {
+        side,
+        lineNo,
+        srcLineSet,
+        peerLineSet,
+        sameFileRefLines,
+        peerVarRefLines,
+      };
+    }
+
+    function autoScrollToRightFirstMatch(side, lineNo, srcLineSet) {
+      if (!state.rightData) {
+        return;
+      }
+
+      const rightMatches = new Set();
+      if (srcLineSet && srcLineSet.size > 0) {
+        for (const srcLineNo of srcLineSet) {
+          const lines = state.rightData.sourceLineToCodeLines.get(srcLineNo);
+          if (!lines) {
+            continue;
+          }
+          for (const ln of lines) {
+            rightMatches.add(ln);
+          }
+        }
+      }
+
+      if (side === "right") {
+        rightMatches.add(lineNo);
+      }
+
+      if (rightMatches.size === 0) {
+        return;
+      }
+
+      const first = Math.min(...rightMatches);
+      const target = rightViewer.querySelector(`.line[data-side="right"][data-line-no="${first}"]`);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+      }
+    }
+  </script>
+</body>
+</html>
