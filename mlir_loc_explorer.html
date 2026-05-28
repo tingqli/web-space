@@ -597,7 +597,7 @@
       state.locked = buildHighlightState(side, lineNo, parsed, peerParsed);
       state.hover = null;
       applyHighlight();
-      autoScrollToRightFirstMatch(side, lineNo, state.locked.srcLineSet);
+      autoScrollToRightFirstMatch(side, state.locked.ownPrimaryLineNo, state.locked.peerLineSet);
       setStatus("已锁定当前高亮；再次点击同一行可取消锁定。");
     }
 
@@ -618,8 +618,8 @@
         return;
       }
 
-      const { side, lineNo, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
-      const ownSelector = `.line[data-side="${side}"][data-line-no="${lineNo}"]`;
+      const { side, ownPrimaryLineNo, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
+      const ownSelector = `.line[data-side="${side}"][data-line-no="${ownPrimaryLineNo}"]`;
       const own = document.querySelector(ownSelector);
       if (own) {
         own.classList.add("active");
@@ -627,7 +627,7 @@
 
       if (sameFileRefLines && sameFileRefLines.size > 0) {
         sameFileRefLines.forEach((ln) => {
-          if (ln === lineNo) {
+          if (ln === ownPrimaryLineNo) {
             return;
           }
           const refSelector = `.line[data-side="${side}"][data-line-no="${ln}"]`;
@@ -698,23 +698,86 @@
       return out;
     }
 
-    function buildHighlightState(side, lineNo, parsed, peerParsed) {
-      const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
-      const sameFileRefLines = collectSameFileRefLines(parsed, lineNo);
+    function getPeerMatchesForLine(lineNo, parsed, peerParsed) {
       const peerLineSet = new Set();
-      const peerVarRefLines = new Set();
+      if (!parsed || !peerParsed) {
+        return peerLineSet;
+      }
+      const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
+      for (const srcLineNo of srcLineSet) {
+        const peerCodeLines = peerParsed.sourceLineToCodeLines.get(srcLineNo);
+        if (!peerCodeLines) {
+          continue;
+        }
+        for (const ln of peerCodeLines) {
+          peerLineSet.add(ln);
+        }
+      }
+      return peerLineSet;
+    }
 
-      if (peerParsed && srcLineSet.size > 0) {
-        for (const srcLineNo of srcLineSet) {
-          const peerCodeLines = peerParsed.sourceLineToCodeLines.get(srcLineNo);
-          if (!peerCodeLines) {
+    function findFallbackChainToPeer(parsed, peerParsed, startLineNo) {
+      if (!parsed || !peerParsed) {
+        return null;
+      }
+      const visited = new Set([startLineNo]);
+      const queue = [{ lineNo: startLineNo, path: [startLineNo] }];
+
+      while (queue.length > 0) {
+        const current = queue.shift();
+        const defs = parsed.lineToDefinedVars.get(current.lineNo) || [];
+        const nextLineSet = collectVarRefLinesForDefs(parsed, defs, new Set(current.path));
+        const nextLines = Array.from(nextLineSet).sort((a, b) => a - b);
+
+        for (const nextLineNo of nextLines) {
+          if (visited.has(nextLineNo)) {
             continue;
           }
-          for (const ln of peerCodeLines) {
+          visited.add(nextLineNo);
+          const nextPath = current.path.concat(nextLineNo);
+          const nextPeerMatches = getPeerMatchesForLine(nextLineNo, parsed, peerParsed);
+          if (nextPeerMatches.size > 0) {
+            return {
+              pathLines: nextPath,
+              matchedLineNo: nextLineNo,
+              peerLineSet: nextPeerMatches,
+            };
+          }
+          queue.push({ lineNo: nextLineNo, path: nextPath });
+        }
+      }
+      return null;
+    }
+
+    function buildHighlightState(side, lineNo, parsed, peerParsed) {
+      const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
+      let sameFileRefLines = collectSameFileRefLines(parsed, lineNo);
+      const peerLineSet = getPeerMatchesForLine(lineNo, parsed, peerParsed);
+      const peerVarRefLines = new Set();
+      let ownPrimaryLineNo = lineNo;
+
+      if (peerParsed && peerLineSet.size === 0) {
+        const fallback = findFallbackChainToPeer(parsed, peerParsed, lineNo);
+        if (fallback) {
+          for (const ln of fallback.peerLineSet) {
             peerLineSet.add(ln);
           }
+          sameFileRefLines = new Set(fallback.pathLines);
+          if (typeof fallback.matchedLineNo === "number") {
+            ownPrimaryLineNo = fallback.matchedLineNo;
+          }
         }
+      }
 
+      // 若最终命中行不是当前行（def-use 回溯命中），也高亮命中行的 consumer 子语句。
+      if (ownPrimaryLineNo !== lineNo) {
+        const primaryConsumers = collectSameFileRefLines(parsed, ownPrimaryLineNo);
+        for (const ln of primaryConsumers) {
+          sameFileRefLines.add(ln);
+        }
+      }
+
+      if (peerParsed && peerLineSet.size > 0) {
         // 对侧仅定义 1 个 result 的匹配行，额外高亮其引用行。
         for (const peerLineNo of peerLineSet) {
           const defs = peerParsed.lineToDefinedVars.get(peerLineNo) || [];
@@ -731,6 +794,7 @@
       return {
         side,
         lineNo,
+        ownPrimaryLineNo,
         srcLineSet,
         peerLineSet,
         sameFileRefLines,
@@ -738,21 +802,15 @@
       };
     }
 
-    function autoScrollToRightFirstMatch(side, lineNo, srcLineSet) {
+    function autoScrollToRightFirstMatch(side, lineNo, peerLineSet) {
       if (!state.rightData) {
         return;
       }
 
       const rightMatches = new Set();
-      if (srcLineSet && srcLineSet.size > 0) {
-        for (const srcLineNo of srcLineSet) {
-          const lines = state.rightData.sourceLineToCodeLines.get(srcLineNo);
-          if (!lines) {
-            continue;
-          }
-          for (const ln of lines) {
-            rightMatches.add(ln);
-          }
+      if (side !== "right" && peerLineSet && peerLineSet.size > 0) {
+        for (const ln of peerLineSet) {
+          rightMatches.add(ln);
         }
       }
 
