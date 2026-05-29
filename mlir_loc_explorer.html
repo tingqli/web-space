@@ -16,6 +16,14 @@
       --active-peer: #2f3f63;
       --active-var-ref: #5a3e17;
       --accent: #7cb8ff;
+      --syn-comment: #7e8aa3;
+      --syn-keyword: #c792ea;
+      --syn-op: #82aaff;
+      --syn-ssa: #ffcb6b;
+      --syn-type: #89ddff;
+      --syn-attr: #f78c6c;
+      --syn-number: #f2cdcd;
+      --syn-string: #c3e88d;
     }
 
     * {
@@ -25,6 +33,8 @@
     body {
       margin: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      font-weight: 400;
       color: var(--text);
       background: var(--bg);
       height: 100vh;
@@ -130,6 +140,8 @@
       align-items: baseline;
       white-space: pre;
       line-height: 1.35;
+      font-size: 12px;
+      font-weight: 400;
       min-width: 100%;
       width: max-content;
     }
@@ -148,6 +160,7 @@
     .line-code {
       padding-right: 8px;
       overflow: visible;
+      font-weight: 400;
     }
 
     .line.active {
@@ -160,6 +173,46 @@
 
     .line.var-ref-active {
       background: var(--active-var-ref);
+    }
+
+    .tok-comment {
+      color: var(--syn-comment);
+      font-weight: 400;
+    }
+
+    .tok-keyword {
+      color: var(--syn-keyword);
+      font-weight: 400;
+    }
+
+    .tok-op {
+      color: var(--syn-op);
+      font-weight: 400;
+    }
+
+    .tok-ssa {
+      color: var(--syn-ssa);
+      font-weight: 400;
+    }
+
+    .tok-type {
+      color: var(--syn-type);
+      font-weight: 400;
+    }
+
+    .tok-attr {
+      color: var(--syn-attr);
+      font-weight: 400;
+    }
+
+    .tok-number {
+      color: var(--syn-number);
+      font-weight: 400;
+    }
+
+    .tok-string {
+      color: var(--syn-string);
+      font-weight: 400;
     }
   </style>
 </head>
@@ -227,6 +280,53 @@
 
     function setStatus(msg) {
       statusEl.textContent = msg;
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function syntaxHighlightMlirLine(line) {
+      const tokenRe = /\/\/.*$|"(?:[^"\\]|\\.)*"|%[-A-Za-z0-9.$_]+(?:#[0-9]+)?|![A-Za-z0-9_.$<>?:(),* \-]+|#[A-Za-z_][A-Za-z0-9_.$]*|-?\b\d+(?:\.\d+)?\b|@[A-Za-z_.$][A-Za-z0-9_.$]*|\b(?:module|attributes|gpu\.module|gpu\.func|func\.func|kernel|loc|fused|unknown|return|async|in|blocks|threads|args)\b|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]+/g;
+      let out = "";
+      let last = 0;
+      let m;
+      tokenRe.lastIndex = 0;
+
+      while ((m = tokenRe.exec(line)) !== null) {
+        const start = m.index;
+        const tok = m[0];
+        out += escapeHtml(line.slice(last, start));
+        let cls = "";
+        if (tok.startsWith("//")) {
+          cls = "tok-comment";
+        } else if (tok.startsWith("\"")) {
+          cls = "tok-string";
+        } else if (tok.startsWith("%")) {
+          cls = "tok-ssa";
+        } else if (tok.startsWith("!")) {
+          cls = "tok-type";
+        } else if (tok.startsWith("#") || tok.startsWith("@")) {
+          cls = "tok-attr";
+        } else if (/^-?\d/.test(tok)) {
+          cls = "tok-number";
+        } else if (tok.includes(".")) {
+          if (/^(gpu\.module|gpu\.func|func\.func)$/.test(tok)) {
+            cls = "tok-keyword";
+          } else {
+            cls = "tok-op";
+          }
+        } else {
+          cls = "tok-keyword";
+        }
+        out += `<span class="${cls}">${escapeHtml(tok)}</span>`;
+        last = tokenRe.lastIndex;
+      }
+      out += escapeHtml(line.slice(last));
+      return out.length > 0 ? out : " ";
     }
 
     function setLoading(disabled) {
@@ -466,6 +566,7 @@
       const sourceLineToCodeLines = new Map();
       const lineToDefinedVars = new Map();
       const lineToUsedVars = new Map();
+      const varToDefLine = new Map();
 
       function normalizeDefToken(token) {
         const t = token.trim();
@@ -532,6 +633,12 @@
 
         lineToDefinedVars.set(codeLineNo, parseDefinedVars(line));
         lineToUsedVars.set(codeLineNo, parseUsedVars(line));
+        const defs = lineToDefinedVars.get(codeLineNo) || [];
+        for (const defVar of defs) {
+          if (!varToDefLine.has(defVar)) {
+            varToDefLine.set(defVar, codeLineNo);
+          }
+        }
       });
 
       return {
@@ -540,6 +647,7 @@
         sourceLineToCodeLines,
         lineToDefinedVars,
         lineToUsedVars,
+        varToDefLine,
       };
     }
 
@@ -563,7 +671,7 @@
 
         const text = document.createElement("span");
         text.className = "line-code";
-        text.textContent = code.length === 0 ? " " : code;
+        text.innerHTML = syntaxHighlightMlirLine(code);
 
         row.appendChild(no);
         row.appendChild(text);
@@ -666,6 +774,18 @@
       return collectVarRefLinesForDefs(parsed, defs, new Set([lineNo]));
     }
 
+    function collectImmediateChildLine(parsed, lineNo, excludedLines = new Set()) {
+      if (!parsed) {
+        return null;
+      }
+      const defs = parsed.lineToDefinedVars.get(lineNo) || [];
+      const refs = collectVarRefLinesForDefs(parsed, defs, excludedLines);
+      if (refs.size === 0) {
+        return null;
+      }
+      return Math.min(...refs);
+    }
+
     function collectVarRefLinesForDefs(parsed, defs, excludedLines = new Set()) {
       const out = new Set();
       if (!parsed || !defs || defs.length === 0) {
@@ -716,6 +836,55 @@
       return peerLineSet;
     }
 
+    function normalizeUseVar(useVar) {
+      if (typeof useVar !== "string") {
+        return "";
+      }
+      return useVar.replace(/#[0-9]+$/, "");
+    }
+
+    function collectParentChainNoLocLines(parsed, peerParsed, startLineNo) {
+      const out = new Set();
+      if (!parsed || !peerParsed) {
+        return out;
+      }
+
+      const visited = new Set([startLineNo]);
+      const queue = [startLineNo];
+
+      while (queue.length > 0) {
+        const currentLineNo = queue.shift();
+        const used = parsed.lineToUsedVars.get(currentLineNo) || new Set();
+        const parentSet = new Set();
+
+        for (const useVar of used) {
+          const baseVar = normalizeUseVar(useVar);
+          if (!baseVar) {
+            continue;
+          }
+          const defLineNo = parsed.varToDefLine.get(baseVar);
+          if (typeof defLineNo !== "number" || defLineNo === currentLineNo) {
+            continue;
+          }
+          parentSet.add(defLineNo);
+        }
+
+        const parents = Array.from(parentSet).sort((a, b) => a - b);
+        for (const parentLineNo of parents) {
+          if (visited.has(parentLineNo)) {
+            continue;
+          }
+          visited.add(parentLineNo);
+          queue.push(parentLineNo);
+          if (getPeerMatchesForLine(parentLineNo, parsed, peerParsed).size === 0) {
+            out.add(parentLineNo);
+          }
+        }
+      }
+
+      return out;
+    }
+
     function findFallbackChainToPeer(parsed, peerParsed, startLineNo) {
       if (!parsed || !peerParsed) {
         return null;
@@ -751,7 +920,7 @@
 
     function buildHighlightState(side, lineNo, parsed, peerParsed) {
       const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
-      let sameFileRefLines = collectSameFileRefLines(parsed, lineNo);
+      const sameFileRefLines = new Set();
       const peerLineSet = getPeerMatchesForLine(lineNo, parsed, peerParsed);
       const peerVarRefLines = new Set();
       let ownPrimaryLineNo = lineNo;
@@ -762,17 +931,25 @@
           for (const ln of fallback.peerLineSet) {
             peerLineSet.add(ln);
           }
-          sameFileRefLines = new Set(fallback.pathLines);
+          for (const ln of fallback.pathLines) {
+            sameFileRefLines.add(ln);
+          }
           if (typeof fallback.matchedLineNo === "number") {
             ownPrimaryLineNo = fallback.matchedLineNo;
           }
         }
       }
 
-      // 若最终命中行不是当前行（def-use 回溯命中），也高亮命中行的 consumer 子语句。
-      if (ownPrimaryLineNo !== lineNo) {
-        const primaryConsumers = collectSameFileRefLines(parsed, ownPrimaryLineNo);
-        for (const ln of primaryConsumers) {
+      if (peerLineSet.size > 0) {
+        // 命中语句只保留 1 条子语句高亮。
+        const firstChild = collectImmediateChildLine(parsed, ownPrimaryLineNo, new Set([ownPrimaryLineNo]));
+        if (typeof firstChild === "number") {
+          sameFileRefLines.add(firstChild);
+        }
+
+        // 命中语句的全部 parent 链路中，无 loc 命中的语句全部高亮。
+        const parentNoLocLines = collectParentChainNoLocLines(parsed, peerParsed, ownPrimaryLineNo);
+        for (const ln of parentNoLocLines) {
           sameFileRefLines.add(ln);
         }
       }
