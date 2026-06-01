@@ -214,6 +214,23 @@
       color: var(--syn-string);
       font-weight: 400;
     }
+
+    .loc-tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 540px;
+      background: #10131a;
+      color: var(--text);
+      border: 1px solid #3a4766;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -246,6 +263,7 @@
       <div id="rightViewer" class="viewer"></div>
     </section>
   </div>
+  <div id="locTooltip" class="loc-tooltip"></div>
 
   <script>
     const state = {
@@ -271,6 +289,7 @@
     const progressWrap = document.getElementById("progressWrap");
     const loadProgress = document.getElementById("loadProgress");
     const progressText = document.getElementById("progressText");
+    const locTooltip = document.getElementById("locTooltip");
 
     pickDirBtn.addEventListener("click", pickDirectory);
     importDirBtn.addEventListener("click", () => dirInput.click());
@@ -504,7 +523,7 @@
       // #loc3 = loc(unknown)
       const defs = new Map();
       const defLineRe = /^#(loc[0-9A-Za-z_]+)\s*=\s*loc\((.*)\)\s*$/;
-      const directLineRe = /^"(?:[^"\\]|\\.)*":(\d+):(\d+)$/;
+      const directLineRe = /^"((?:[^"\\]|\\.)*)":(\d+):(\d+)$/;
       const refRe = /#(loc[0-9A-Za-z_]+)/g;
 
       for (const line of lines) {
@@ -514,12 +533,14 @@
         }
         const id = m[1];
         const raw = m[2].trim();
-        const item = { type: "other", line: null, refs: [] };
+        const item = { type: "other", file: null, line: null, col: null, refs: [] };
 
         const dm = raw.match(directLineRe);
         if (dm) {
           item.type = "direct";
-          item.line = Number(dm[1]);
+          item.file = dm[1];
+          item.line = Number(dm[2]);
+          item.col = Number(dm[3]);
         } else if (raw === "unknown") {
           item.type = "unknown";
         } else {
@@ -561,12 +582,45 @@
       }
 
       const codeLocRefRe = /loc\(#(loc[0-9A-Za-z_]+)\)/g;
-      const codeLocDirectRe = /loc\("([^"\\]|\\.)*":(\d+):(\d+)\)/g;
+      const codeLocDirectRe = /loc\("((?:[^"\\]|\\.)*)":(\d+):(\d+)\)/g;
       const lineToSourceLines = new Map();
+      const lineToSourceLocs = new Map();
       const sourceLineToCodeLines = new Map();
       const lineToDefinedVars = new Map();
       const lineToUsedVars = new Map();
       const varToDefLine = new Map();
+
+      function makeLocLabel(file, line, col) {
+        const safeFile = typeof file === "string" && file.length > 0 ? file : "<unknown-file>";
+        const safeLine = Number.isFinite(line) ? line : "?";
+        const safeCol = Number.isFinite(col) ? col : "?";
+        return `${safeFile}:${safeLine}:${safeCol}`;
+      }
+
+      function resolveLocLabels(locId, visiting = new Set()) {
+        if (!locId || visiting.has(locId)) {
+          return new Set();
+        }
+        visiting.add(locId);
+        const def = defs.get(locId);
+        if (!def) {
+          return new Set();
+        }
+        if (def.type === "direct") {
+          return new Set([makeLocLabel(def.file, def.line, def.col)]);
+        }
+        if (def.type === "unknown") {
+          return new Set();
+        }
+        const out = new Set();
+        for (const ref of def.refs || []) {
+          const child = resolveLocLabels(ref, new Set(visiting));
+          for (const label of child) {
+            out.add(label);
+          }
+        }
+        return out;
+      }
 
       function normalizeDefToken(token) {
         const t = token.trim();
@@ -608,6 +662,7 @@
         const codeLineNo = idx + 1;
         let rm;
         const srcLines = new Set();
+        const srcLocs = new Set();
         codeLocRefRe.lastIndex = 0;
         while ((rm = codeLocRefRe.exec(line)) !== null) {
           const locId = rm[1];
@@ -615,15 +670,23 @@
           for (const s of resolved) {
             srcLines.add(s);
           }
+          const resolvedLabels = resolveLocLabels(locId);
+          for (const label of resolvedLabels) {
+            srcLocs.add(label);
+          }
         }
         codeLocDirectRe.lastIndex = 0;
         while ((rm = codeLocDirectRe.exec(line)) !== null) {
+          const srcFile = rm[1];
           const srcLine = Number(rm[2]);
+          const srcCol = Number(rm[3]);
           if (Number.isFinite(srcLine)) {
             srcLines.add(srcLine);
           }
+          srcLocs.add(makeLocLabel(srcFile, srcLine, srcCol));
         }
         lineToSourceLines.set(codeLineNo, srcLines);
+        lineToSourceLocs.set(codeLineNo, srcLocs);
         for (const srcLineNo of srcLines) {
           if (!sourceLineToCodeLines.has(srcLineNo)) {
             sourceLineToCodeLines.set(srcLineNo, new Set());
@@ -644,11 +707,44 @@
       return {
         lines,
         lineToSourceLines,
+        lineToSourceLocs,
         sourceLineToCodeLines,
         lineToDefinedVars,
         lineToUsedVars,
         varToDefLine,
       };
+    }
+
+    function setTooltipPosition(clientX, clientY) {
+      const offset = 14;
+      const rect = locTooltip.getBoundingClientRect();
+      const maxLeft = window.innerWidth - rect.width - 8;
+      const maxTop = window.innerHeight - rect.height - 8;
+      const left = Math.max(8, Math.min(clientX + offset, maxLeft));
+      const top = Math.max(8, Math.min(clientY + offset, maxTop));
+      locTooltip.style.left = `${left}px`;
+      locTooltip.style.top = `${top}px`;
+    }
+
+    function showLocTooltip(parsed, lineNo, clientX, clientY) {
+      if (!parsed || !locTooltip) {
+        return;
+      }
+      const locs = parsed.lineToSourceLocs?.get(lineNo) || new Set();
+      if (locs.size === 0) {
+        locTooltip.style.display = "none";
+        return;
+      }
+      const sorted = Array.from(locs).sort((a, b) => a.localeCompare(b));
+      locTooltip.innerHTML = sorted.map((s) => escapeHtml(s)).join("<br>");
+      locTooltip.style.display = "block";
+      setTooltipPosition(clientX, clientY);
+    }
+
+    function hideLocTooltip() {
+      if (locTooltip) {
+        locTooltip.style.display = "none";
+      }
     }
 
     function renderPane(container, parsed, side, peerParsed) {
@@ -677,7 +773,8 @@
         row.appendChild(text);
         frag.appendChild(row);
 
-        row.addEventListener("mouseenter", () => onHoverLine(side, codeLineNo, parsed, peerParsed));
+        row.addEventListener("mouseenter", (ev) => onHoverLine(ev, side, codeLineNo, parsed, peerParsed));
+        row.addEventListener("mousemove", (ev) => showLocTooltip(parsed, codeLineNo, ev.clientX, ev.clientY));
         row.addEventListener("click", () => onClickLine(side, codeLineNo, parsed, peerParsed));
       });
 
@@ -685,7 +782,8 @@
       container.addEventListener("mouseleave", clearHover);
     }
 
-    function onHoverLine(side, lineNo, parsed, peerParsed) {
+    function onHoverLine(event, side, lineNo, parsed, peerParsed) {
+      showLocTooltip(parsed, lineNo, event.clientX, event.clientY);
       if (state.locked) {
         return;
       }
@@ -710,6 +808,7 @@
     }
 
     function clearHover() {
+      hideLocTooltip();
       if (state.locked) {
         return;
       }
@@ -774,16 +873,12 @@
       return collectVarRefLinesForDefs(parsed, defs, new Set([lineNo]));
     }
 
-    function collectImmediateChildLine(parsed, lineNo, excludedLines = new Set()) {
+    function collectImmediateChildLines(parsed, lineNo, excludedLines = new Set()) {
       if (!parsed) {
-        return null;
+        return new Set();
       }
       const defs = parsed.lineToDefinedVars.get(lineNo) || [];
-      const refs = collectVarRefLinesForDefs(parsed, defs, excludedLines);
-      if (refs.size === 0) {
-        return null;
-      }
-      return Math.min(...refs);
+      return collectVarRefLinesForDefs(parsed, defs, excludedLines);
     }
 
     function collectVarRefLinesForDefs(parsed, defs, excludedLines = new Set()) {
@@ -941,10 +1036,10 @@
       }
 
       if (peerLineSet.size > 0) {
-        // 命中语句只保留 1 条子语句高亮。
-        const firstChild = collectImmediateChildLine(parsed, ownPrimaryLineNo, new Set([ownPrimaryLineNo]));
-        if (typeof firstChild === "number") {
-          sameFileRefLines.add(firstChild);
+        // 命中语句的直接 user 语句全部高亮。
+        const childLines = collectImmediateChildLines(parsed, ownPrimaryLineNo, new Set([ownPrimaryLineNo]));
+        for (const childLine of childLines) {
+          sameFileRefLines.add(childLine);
         }
 
         // 命中语句的全部 parent 链路中，无 loc 命中的语句全部高亮。
