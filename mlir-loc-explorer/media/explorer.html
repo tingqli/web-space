@@ -1,0 +1,1004 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';">
+  <title>MLIR Loc Explorer</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a3040;
+      --text: #e6e8ef;
+      --muted: #a2a9ba;
+      --hover: #293149;
+      --active: #2d4f8a;
+      --active-peer: #2f3f63;
+      --active-var-ref: #5a3e17;
+      --accent: #7cb8ff;
+      --syn-comment: #7e8aa3;
+      --syn-keyword: #c792ea;
+      --syn-op: #82aaff;
+      --syn-ssa: #ffcb6b;
+      --syn-type: #89ddff;
+      --syn-attr: #f78c6c;
+      --syn-number: #f2cdcd;
+      --syn-string: #c3e88d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--text);
+      background: var(--bg);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      background: #10131a;
+    }
+
+    .toolbar label { font-size: 12px; color: var(--muted); }
+
+    button, select {
+      background: #1a2030;
+      color: var(--text);
+      border: 1px solid #34405a;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    button:hover, select:hover { border-color: #4f6288; }
+    button:disabled, select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .hint { color: var(--muted); font-size: 12px; }
+
+    .panes {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 8px minmax(0, 1fr);
+      gap: 0;
+      padding: 0;
+    }
+
+    .pane {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 0;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .pane-left {
+      border-right: none;
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+
+    .pane-right {
+      border-left: none;
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }
+
+    .splitter {
+      position: relative;
+      cursor: col-resize;
+      user-select: none;
+      touch-action: none;
+    }
+
+    .splitter::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 0;
+      transform: translateX(-50%);
+      width: 1px;
+      height: 100%;
+      background: var(--border);
+    }
+
+    .splitter:hover::before,
+    .splitter.dragging::before {
+      width: 3px;
+      background: var(--accent);
+    }
+
+    .pane-title {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pane-title label {
+      color: var(--muted);
+      font-size: 12px;
+      user-select: none;
+      flex: none;
+    }
+
+    .pane-title select {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .viewer {
+      flex: 1;
+      overflow: auto;
+      padding: 8px 0;
+    }
+
+    .line {
+      display: grid;
+      grid-template-columns: 56px auto;
+      align-items: baseline;
+      white-space: pre;
+      line-height: 1.35;
+      font-size: 12px;
+      font-weight: 400;
+      min-width: 100%;
+      width: max-content;
+    }
+
+    .line:hover { background: var(--hover); }
+
+    .line-no {
+      color: #74809a;
+      text-align: right;
+      padding-right: 10px;
+      user-select: none;
+    }
+
+    .line-code { padding-right: 8px; overflow: visible; font-weight: 400; }
+
+    .line.active        { background: var(--active); }
+    .line.peer-active   { background: var(--active-peer); }
+    .line.var-ref-active { background: var(--active-var-ref); }
+
+    .tok-comment { color: var(--syn-comment); font-weight: 400; }
+    .tok-keyword { color: var(--syn-keyword); font-weight: 400; }
+    .tok-op      { color: var(--syn-op);      font-weight: 400; }
+    .tok-ssa     { color: var(--syn-ssa);     font-weight: 400; }
+    .tok-type    { color: var(--syn-type);    font-weight: 400; }
+    .tok-attr    { color: var(--syn-attr);    font-weight: 400; }
+    .tok-number  { color: var(--syn-number);  font-weight: 400; }
+    .tok-string  { color: var(--syn-string);  font-weight: 400; }
+
+    .loc-tooltip {
+      position: fixed;
+      z-index: 1000;
+      max-width: 540px;
+      background: #10131a;
+      color: var(--text);
+      border: 1px solid #3a4766;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+      pointer-events: none;
+      white-space: pre-wrap;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span id="status" class="hint">请在命令执行后等待目录加载。鼠标悬停联动，单击锁定。</span>
+  </div>
+
+  <div id="panes" class="panes">
+    <section class="pane pane-left">
+      <div class="pane-title">
+        <label for="leftFileSelect">左侧文件</label>
+        <select id="leftFileSelect"></select>
+      </div>
+      <div id="leftViewer"  class="viewer"></div>
+    </section>
+    <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="调整左右面板宽度"></div>
+    <section class="pane pane-right">
+      <div class="pane-title">
+        <label for="rightFileSelect">右侧文件</label>
+        <select id="rightFileSelect"></select>
+      </div>
+      <div id="rightViewer" class="viewer"></div>
+    </section>
+  </div>
+  <div id="locTooltip" class="loc-tooltip"></div>
+
+  <script>
+    // Acquire VS Code API (only once per webview lifetime)
+    const vscode = acquireVsCodeApi();
+
+    const state = {
+      files: [],
+      mlirFiles: [],
+      allFiles: [],
+      fileTextByName: new Map(),
+      parsedByFile: new Map(),
+      hover: null,
+      locked: null,
+      leftData: null,
+      rightData: null,
+      currentLeftFile: null,
+      currentRightFile: null,
+    };
+
+    const leftSelect        = document.getElementById("leftFileSelect");
+    const rightSelect       = document.getElementById("rightFileSelect");
+    const leftViewer        = document.getElementById("leftViewer");
+    const rightViewer       = document.getElementById("rightViewer");
+    const panesEl           = document.getElementById("panes");
+    const splitterEl        = document.getElementById("splitter");
+    const statusEl          = document.getElementById("status");
+    const locTooltip        = document.getElementById("locTooltip");
+
+    function getSortedLocEntries(parsed, lineNo) {
+      if (!parsed) return [];
+      const locs = parsed.lineToSourceLocs?.get(lineNo) || new Set();
+      return Array.from(locs)
+        .map((entry) => parseLocLabel(entry))
+        .filter((entry) => entry !== null)
+        .sort((a, b) => {
+          if (a.file !== b.file) return a.file.localeCompare(b.file);
+          if (a.line !== b.line) return a.line - b.line;
+          return a.col - b.col;
+        });
+    }
+
+    function parseLocLabel(label) {
+      if (typeof label !== "string") return null;
+      const match = label.match(/^(.*):(\d+):(\d+)$/);
+      if (!match) return null;
+      return {
+        file: match[1],
+        line: Number(match[2]),
+        col: Number(match[3]),
+      };
+    }
+
+    splitterEl.addEventListener("pointerdown", startResize);
+
+    leftSelect.addEventListener("change",  renderBoth);
+    rightSelect.addEventListener("change", renderBoth);
+
+    // ── Message handler (extension host → webview) ─────────────────────────────
+    window.addEventListener("message", async (event) => {
+      const msg = event.data;
+      if (msg.command === "loadFiles") {
+        const files = msg.files || [];
+        const names = files.map((f) => f.name);
+        const mlirFiles = msg.mlirFiles || names.filter((n) => n.toLowerCase().endsWith(".mlir"));
+        const allFiles = msg.allFiles || names;
+        const fileTextByName = new Map(files.map((f) => [f.name, f.text]));
+
+        state.files = names;
+        state.mlirFiles = mlirFiles;
+        state.allFiles = allFiles;
+        state.fileTextByName = fileTextByName;
+        state.parsedByFile.clear();
+
+        if (mlirFiles.length === 0) {
+          fillSelect(leftSelect,  []);
+          fillSelect(rightSelect, []);
+          leftViewer.innerHTML  = "";
+          rightViewer.innerHTML = "";
+          setStatus("所选目录中没有 .mlir 文件。");
+          setLoading(false);
+          return;
+        }
+
+        fillSelect(leftSelect, mlirFiles, 0);
+
+        const rightCandidates = allFiles.length > 0 ? allFiles : mlirFiles;
+        let rightDefaultIdx = 0;
+        if (mlirFiles.length > 1) {
+          const secondMlir = mlirFiles[1];
+          const foundIdx = rightCandidates.indexOf(secondMlir);
+          rightDefaultIdx = foundIdx >= 0 ? foundIdx : 0;
+        }
+        fillSelect(rightSelect, rightCandidates, rightDefaultIdx);
+
+        await renderBoth();
+        const nonMlirCount = Math.max(0, allFiles.length - mlirFiles.length);
+        setStatus(`已加载，共 ${mlirFiles.length} 个 .mlir 文件，${nonMlirCount} 个非 .mlir 文件。`);
+        setLoading(false);
+
+      } else if (msg.command === "loadStart") {
+        setLoading(true);
+        setStatus("正在读取文件...");
+
+      } else if (msg.command === "loadCancelled") {
+        setLoading(false);
+        setStatus("已取消。");
+
+      } else if (msg.command === "loadError") {
+        setLoading(false);
+        setStatus(`加载失败: ${msg.message || "未知错误"}`);
+      }
+    });
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    function escapeHtml(text) {
+      return text
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function syntaxHighlightMlirLine(line) {
+      const tokenRe = /\/\/.*$|"(?:[^"\\]|\\.)*"|%[-A-Za-z0-9.$_]+(?:#[0-9]+)?|![A-Za-z0-9_.$<>?:(),* \-]+|#[A-Za-z_][A-Za-z0-9_.$]*|-?\b\d+(?:\.\d+)?\b|@[A-Za-z_.$][A-Za-z0-9_.$]*|\b(?:module|attributes|gpu\.module|gpu\.func|func\.func|kernel|loc|fused|unknown|return|async|in|blocks|threads|args)\b|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]+/g;
+      let out = "";
+      let last = 0;
+      let m;
+      tokenRe.lastIndex = 0;
+      while ((m = tokenRe.exec(line)) !== null) {
+        const start = m.index;
+        const tok   = m[0];
+        out += escapeHtml(line.slice(last, start));
+        let cls = "";
+        if (tok.startsWith("//"))        cls = "tok-comment";
+        else if (tok.startsWith('"'))    cls = "tok-string";
+        else if (tok.startsWith("%"))    cls = "tok-ssa";
+        else if (tok.startsWith("!"))    cls = "tok-type";
+        else if (tok.startsWith("#") || tok.startsWith("@")) cls = "tok-attr";
+        else if (/^-?\d/.test(tok))      cls = "tok-number";
+        else if (tok.includes(".")) {
+          cls = /^(gpu\.module|gpu\.func|func\.func)$/.test(tok)
+            ? "tok-keyword"
+            : "tok-op";
+        } else {
+          cls = "tok-keyword";
+        }
+        out += `<span class="${cls}">${escapeHtml(tok)}</span>`;
+        last = tokenRe.lastIndex;
+      }
+      out += escapeHtml(line.slice(last));
+      return out.length > 0 ? out : " ";
+    }
+
+    function setLoading(disabled) {
+      leftSelect.disabled       = disabled;
+      rightSelect.disabled      = disabled;
+    }
+
+    function setPaneRatio(leftFraction) {
+      const clamped = Math.max(0.15, Math.min(0.85, leftFraction));
+      panesEl.style.gridTemplateColumns = `${clamped}fr 8px ${1 - clamped}fr`;
+    }
+
+    function startResize(event) {
+      event.preventDefault();
+      splitterEl.classList.add("dragging");
+      document.body.style.cursor = "col-resize";
+
+      const move = (moveEvent) => {
+        const rect = panesEl.getBoundingClientRect();
+        if (rect.width <= 8) return;
+        const offset = moveEvent.clientX - rect.left;
+        const ratio = offset / rect.width;
+        setPaneRatio(ratio);
+      };
+
+      const stop = () => {
+        splitterEl.classList.remove("dragging");
+        document.body.style.cursor = "";
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+      };
+
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+      window.addEventListener("pointercancel", stop);
+    }
+
+    function fillSelect(selectEl, files, selectedIdx = 0) {
+      selectEl.innerHTML = "";
+      files.forEach((name, idx) => {
+        const opt = document.createElement("option");
+        opt.value     = name;
+        opt.textContent = name;
+        if (idx === selectedIdx) opt.selected = true;
+        selectEl.appendChild(opt);
+      });
+    }
+
+    async function getParsed(fileName) {
+      if (!fileName) return null;
+      if (!fileName.toLowerCase().endsWith(".mlir")) return null;
+      if (state.parsedByFile.has(fileName)) return state.parsedByFile.get(fileName);
+      const text = state.fileTextByName.get(fileName);
+      if (typeof text !== "string") return null;
+      const parsed = parseMlir(text);
+      state.parsedByFile.set(fileName, parsed);
+      return parsed;
+    }
+
+    async function renderBoth() {
+      if (state.fileTextByName.size === 0) return;
+      const prevLeftFile = state.currentLeftFile;
+      const prevRightFile = state.currentRightFile;
+      const prevLocked = state.locked;
+
+      const leftFile  = leftSelect.value;
+      const rightFile = rightSelect.value;
+
+      if (!leftFile) return;
+
+      const leftParsed = await getParsed(leftFile);
+      if (!leftParsed) {
+        leftViewer.innerHTML = "";
+        rightViewer.innerHTML = "";
+        setStatus("左侧必须选择 .mlir 文件。");
+        return;
+      }
+
+      const rightIsMlir = typeof rightFile === "string" && rightFile.toLowerCase().endsWith(".mlir");
+      const rightParsed = rightIsMlir ? await getParsed(rightFile) : null;
+
+      state.hover    = null;
+      state.leftData  = leftParsed;
+      state.rightData = rightParsed;
+      renderPane(leftViewer,  leftParsed,  "left",  rightParsed);
+
+      if (rightIsMlir && rightParsed) {
+        renderPane(rightViewer, rightParsed, "right", leftParsed);
+      } else {
+        const rightText = state.fileTextByName.get(rightFile) || "";
+        renderPlainPane(rightViewer, rightText, "right");
+      }
+
+      state.currentLeftFile = leftFile;
+      state.currentRightFile = rightFile;
+
+      state.locked = rebuildLockForFileSwitch(
+        prevLocked,
+        prevLeftFile,
+        prevRightFile,
+        leftFile,
+        rightFile,
+        leftParsed,
+        rightParsed
+      );
+      applyHighlight();
+    }
+
+    function rebuildLockForFileSwitch(
+      prevLocked,
+      prevLeftFile,
+      prevRightFile,
+      nextLeftFile,
+      nextRightFile,
+      nextLeftParsed,
+      nextRightParsed
+    ) {
+      if (!prevLocked) {
+        return null;
+      }
+
+      const leftUnchanged = prevLeftFile === nextLeftFile;
+      const rightUnchanged = prevRightFile === nextRightFile;
+
+      if (!leftUnchanged && !rightUnchanged) {
+        return null;
+      }
+
+      if (prevLocked.side === "left" && leftUnchanged && nextLeftParsed) {
+        return buildHighlightState("left", clampLineNo(prevLocked.lineNo, nextLeftParsed), nextLeftParsed, nextRightParsed);
+      }
+
+      if (prevLocked.side === "right" && rightUnchanged && nextRightParsed) {
+        return buildHighlightState("right", clampLineNo(prevLocked.lineNo, nextRightParsed), nextRightParsed, nextLeftParsed);
+      }
+
+      if (prevLocked.side === "left" && rightUnchanged && nextRightParsed) {
+        const anchor = pickAnchorLineFromSet(prevLocked.peerLineSet, nextRightParsed);
+        return anchor ? buildHighlightState("right", anchor, nextRightParsed, nextLeftParsed) : null;
+      }
+
+      if (prevLocked.side === "right" && leftUnchanged && nextLeftParsed) {
+        const anchor = pickAnchorLineFromSet(prevLocked.peerLineSet, nextLeftParsed);
+        return anchor ? buildHighlightState("left", anchor, nextLeftParsed, nextRightParsed) : null;
+      }
+
+      return null;
+    }
+
+    function clampLineNo(lineNo, parsed) {
+      if (!parsed || !Array.isArray(parsed.lines) || parsed.lines.length === 0) {
+        return 1;
+      }
+      const n = Number.isFinite(lineNo) ? Math.floor(lineNo) : 1;
+      return Math.max(1, Math.min(parsed.lines.length, n));
+    }
+
+    function pickAnchorLineFromSet(lineSet, parsed) {
+      if (!parsed || !Array.isArray(parsed.lines) || parsed.lines.length === 0) {
+        return null;
+      }
+      if (!lineSet || lineSet.size === 0) {
+        return null;
+      }
+      const maxLine = parsed.lines.length;
+      const candidates = Array.from(lineSet)
+        .filter((n) => Number.isFinite(n) && n >= 1 && n <= maxLine)
+        .sort((a, b) => a - b);
+      return candidates.length > 0 ? candidates[0] : null;
+    }
+
+    function renderPlainPane(container, text, side) {
+      container.innerHTML = "";
+      const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+      const frag = document.createDocumentFragment();
+
+      lines.forEach((code, idx) => {
+        const row = document.createElement("div");
+        row.className = "line";
+        row.dataset.side = side;
+        row.dataset.lineNo = String(idx + 1);
+
+        const no = document.createElement("span");
+        no.className = "line-no";
+        no.textContent = String(idx + 1);
+
+        const textSpan = document.createElement("span");
+        textSpan.className = "line-code";
+        textSpan.innerHTML = escapeHtml(code.length > 0 ? code : " ");
+
+        row.appendChild(no);
+        row.appendChild(textSpan);
+        frag.appendChild(row);
+      });
+
+      container.appendChild(frag);
+      container.addEventListener("mouseleave", clearHover);
+    }
+
+    // ── MLIR parser ───────────────────────────────────────────────────────────
+    function parseMlir(text) {
+      const lines = text.replace(/\r\n/g, "\n").split("\n");
+
+      const defs      = new Map();
+      const defLineRe    = /^#(loc[0-9A-Za-z_]+)\s*=\s*loc\((.*)\)\s*$/;
+      const directLineRe = /^"((?:[^"\\]|\\.)*)":(\d+):(\d+)$/;
+      const refRe        = /#(loc[0-9A-Za-z_]+)/g;
+
+      for (const line of lines) {
+        const m = line.match(defLineRe);
+        if (!m) continue;
+        const id  = m[1];
+        const raw = m[2].trim();
+        const item = { type: "other", file: null, line: null, col: null, refs: [] };
+        const dm = raw.match(directLineRe);
+        if (dm) {
+          item.type = "direct";
+          item.file = dm[1];
+          item.line = Number(dm[2]);
+          item.col  = Number(dm[3]);
+        } else if (raw === "unknown") {
+          item.type = "unknown";
+        } else {
+          let rm;
+          refRe.lastIndex = 0;
+          while ((rm = refRe.exec(raw)) !== null) item.refs.push(rm[1]);
+          if (item.refs.length > 0) item.type = "refs";
+        }
+        defs.set(id, item);
+      }
+
+      function resolveLocLines(locId, visiting = new Set()) {
+        if (!locId || visiting.has(locId)) return new Set();
+        visiting.add(locId);
+        const def = defs.get(locId);
+        if (!def) return new Set();
+        if (def.type === "direct" && typeof def.line === "number") return new Set([def.line]);
+        if (def.type === "unknown") return new Set();
+        const out = new Set();
+        for (const ref of def.refs || []) {
+          for (const ln of resolveLocLines(ref, new Set(visiting))) out.add(ln);
+        }
+        return out;
+      }
+
+      function makeLocLabel(file, line, col) {
+        const safeFile = typeof file === "string" && file.length > 0 ? file : "<unknown-file>";
+        const safeLine = Number.isFinite(line) ? line : "?";
+        const safeCol  = Number.isFinite(col)  ? col  : "?";
+        return `${safeFile}:${safeLine}:${safeCol}`;
+      }
+
+      function resolveLocLabels(locId, visiting = new Set()) {
+        if (!locId || visiting.has(locId)) return new Set();
+        visiting.add(locId);
+        const def = defs.get(locId);
+        if (!def) return new Set();
+        if (def.type === "direct") return new Set([makeLocLabel(def.file, def.line, def.col)]);
+        if (def.type === "unknown") return new Set();
+        const out = new Set();
+        for (const ref of def.refs || []) {
+          for (const label of resolveLocLabels(ref, new Set(visiting))) out.add(label);
+        }
+        return out;
+      }
+
+      function normalizeDefToken(token) {
+        const t = token.trim();
+        const m = t.match(/^(%[-A-Za-z0-9.$_]+)(?::\d+)?$/);
+        return m ? m[1] : null;
+      }
+
+      function parseDefinedVars(line) {
+        const eqIdx = line.indexOf("=");
+        if (eqIdx <= 0) return [];
+        const lhs = line.slice(0, eqIdx).trim();
+        if (!lhs.startsWith("%")) return [];
+        if (lhs.includes(",")) {
+          return lhs.split(",").map((v) => normalizeDefToken(v)).filter((v) => typeof v === "string");
+        }
+        const one = normalizeDefToken(lhs);
+        return one ? [one] : [];
+      }
+
+      function parseUsedVars(line) {
+        const out  = new Set();
+        const useRe = /%[-A-Za-z0-9.$_]+(?:#[0-9]+)?/g;
+        let m;
+        useRe.lastIndex = 0;
+        while ((m = useRe.exec(line)) !== null) out.add(m[0]);
+        return out;
+      }
+
+      const codeLocRefRe    = /loc\(#(loc[0-9A-Za-z_]+)\)/g;
+      const codeLocDirectRe = /loc\("((?:[^"\\]|\\.)*)":(\d+):(\d+)\)/g;
+      const lineToSourceLines   = new Map();
+      const lineToSourceLocs    = new Map();
+      const sourceLineToCodeLines = new Map();
+      const lineToDefinedVars   = new Map();
+      const lineToUsedVars      = new Map();
+      const varToDefLine        = new Map();
+
+      lines.forEach((line, idx) => {
+        const codeLineNo = idx + 1;
+        let rm;
+        const srcLines = new Set();
+        const srcLocs  = new Set();
+
+        codeLocRefRe.lastIndex = 0;
+        while ((rm = codeLocRefRe.exec(line)) !== null) {
+          const locId = rm[1];
+          for (const s of resolveLocLines(locId))  srcLines.add(s);
+          for (const l of resolveLocLabels(locId)) srcLocs.add(l);
+        }
+        codeLocDirectRe.lastIndex = 0;
+        while ((rm = codeLocDirectRe.exec(line)) !== null) {
+          const srcLine = Number(rm[2]);
+          if (Number.isFinite(srcLine)) srcLines.add(srcLine);
+          srcLocs.add(makeLocLabel(rm[1], srcLine, Number(rm[3])));
+        }
+
+        lineToSourceLines.set(codeLineNo, srcLines);
+        lineToSourceLocs.set(codeLineNo, srcLocs);
+        for (const srcLineNo of srcLines) {
+          if (!sourceLineToCodeLines.has(srcLineNo)) sourceLineToCodeLines.set(srcLineNo, new Set());
+          sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
+        }
+
+        lineToDefinedVars.set(codeLineNo, parseDefinedVars(line));
+        lineToUsedVars.set(codeLineNo, parseUsedVars(line));
+        for (const defVar of lineToDefinedVars.get(codeLineNo) || []) {
+          if (!varToDefLine.has(defVar)) varToDefLine.set(defVar, codeLineNo);
+        }
+      });
+
+      return {
+        lines,
+        lineToSourceLines,
+        lineToSourceLocs,
+        sourceLineToCodeLines,
+        lineToDefinedVars,
+        lineToUsedVars,
+        varToDefLine,
+      };
+    }
+
+    // ── Tooltip ────────────────────────────────────────────────────────────────
+    function setTooltipPosition(clientX, clientY) {
+      const offset  = 14;
+      const rect    = locTooltip.getBoundingClientRect();
+      const maxLeft = window.innerWidth  - rect.width  - 8;
+      const maxTop  = window.innerHeight - rect.height - 8;
+      locTooltip.style.left = `${Math.max(8, Math.min(clientX + offset, maxLeft))}px`;
+      locTooltip.style.top  = `${Math.max(8, Math.min(clientY + offset, maxTop))}px`;
+    }
+
+    function showLocTooltip(parsed, lineNo, clientX, clientY) {
+      if (!parsed) return;
+      const sorted = getSortedLocEntries(parsed, lineNo).map((entry) => `${entry.file}:${entry.line}:${entry.col}`);
+      if (sorted.length === 0) { locTooltip.style.display = "none"; return; }
+      locTooltip.innerHTML = sorted.map((s) => escapeHtml(s)).join("<br>");
+      locTooltip.style.display = "block";
+      setTooltipPosition(clientX, clientY);
+    }
+
+    function hideLocTooltip() { if (locTooltip) locTooltip.style.display = "none"; }
+
+    // ── Rendering ─────────────────────────────────────────────────────────────
+    function renderPane(container, parsed, side, peerParsed) {
+      container.innerHTML = "";
+      if (!parsed) return;
+      const frag = document.createDocumentFragment();
+      parsed.lines.forEach((code, idx) => {
+        const codeLineNo = idx + 1;
+        const row  = document.createElement("div");
+        row.className       = "line";
+        row.dataset.side    = side;
+        row.dataset.lineNo  = String(codeLineNo);
+
+        const no = document.createElement("span");
+        no.className    = "line-no";
+        no.textContent  = String(codeLineNo);
+
+        const text = document.createElement("span");
+        text.className  = "line-code";
+        text.innerHTML  = syntaxHighlightMlirLine(code);
+
+        row.appendChild(no);
+        row.appendChild(text);
+        frag.appendChild(row);
+
+        row.addEventListener("mouseenter", (ev) => onHoverLine(ev, side, codeLineNo, parsed, peerParsed));
+        row.addEventListener("mousemove",  (ev) => showLocTooltip(parsed, codeLineNo, ev.clientX, ev.clientY));
+        row.addEventListener("click",      (ev) => onClickLine(ev, side, codeLineNo, parsed, peerParsed));
+      });
+      container.appendChild(frag);
+      container.addEventListener("mouseleave", clearHover);
+    }
+
+    // ── Interaction ────────────────────────────────────────────────────────────
+    function onHoverLine(event, side, lineNo, parsed, peerParsed) {
+      if (!parsed) return;
+      showLocTooltip(parsed, lineNo, event.clientX, event.clientY);
+      if (state.locked) return;
+      state.hover = buildHighlightState(side, lineNo, parsed, peerParsed);
+      applyHighlight();
+    }
+
+    function onClickLine(event, side, lineNo, parsed, peerParsed) {
+      if (!parsed) {
+        return;
+      }
+      if (event.ctrlKey) {
+        const locEntries = getSortedLocEntries(parsed, lineNo);
+        if (locEntries.length > 0) {
+          const target = locEntries[0];
+          vscode.postMessage({
+            command: "openSourceLocation",
+            file: target.file,
+            line: target.line,
+            col: target.col,
+          });
+          setStatus(`已请求打开 ${target.file}:${target.line}:${target.col}`);
+        } else {
+          setStatus("当前行没有可跳转的 loc 信息。");
+        }
+        return;
+      }
+
+      if (state.locked && state.locked.side === side && state.locked.lineNo === lineNo) {
+        state.locked = null;
+        state.hover  = null;
+        applyHighlight();
+        setStatus("已取消锁定，恢复悬停联动。");
+        return;
+      }
+      state.locked = buildHighlightState(side, lineNo, parsed, peerParsed);
+      state.hover  = null;
+      applyHighlight();
+      autoScrollToRightFirstMatch(side, state.locked.ownPrimaryLineNo, state.locked.peerLineSet);
+      setStatus("已锁定当前高亮；再次点击同一行可取消锁定。");
+    }
+
+    function clearHover() {
+      hideLocTooltip();
+      if (state.locked) return;
+      state.hover = null;
+      applyHighlight();
+    }
+
+    function applyHighlight() {
+      document.querySelectorAll(".line").forEach((el) =>
+        el.classList.remove("active", "peer-active", "var-ref-active")
+      );
+      const source = state.locked || state.hover;
+      if (!source) return;
+      const { side, ownPrimaryLineNo, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
+
+      const own = document.querySelector(`.line[data-side="${side}"][data-line-no="${ownPrimaryLineNo}"]`);
+      if (own) own.classList.add("active");
+
+      if (sameFileRefLines && sameFileRefLines.size > 0) {
+        sameFileRefLines.forEach((ln) => {
+          if (ln === ownPrimaryLineNo) return;
+          const el = document.querySelector(`.line[data-side="${side}"][data-line-no="${ln}"]`);
+          if (el) el.classList.add("var-ref-active");
+        });
+      }
+
+      const peerSide = side === "left" ? "right" : "left";
+      peerLineSet.forEach((ln) => {
+        const el = document.querySelector(`.line[data-side="${peerSide}"][data-line-no="${ln}"]`);
+        if (el) el.classList.add("peer-active");
+      });
+
+      if (peerVarRefLines && peerVarRefLines.size > 0) {
+        peerVarRefLines.forEach((ln) => {
+          const el = document.querySelector(`.line[data-side="${peerSide}"][data-line-no="${ln}"]`);
+          if (el) el.classList.add("var-ref-active");
+        });
+      }
+    }
+
+    // ── Highlight state building ───────────────────────────────────────────────
+    function collectVarRefLinesForDefs(parsed, defs, excludedLines = new Set()) {
+      const out = new Set();
+      if (!parsed || !defs || defs.length === 0) return out;
+      parsed.lines.forEach((_, idx) => {
+        const ln = idx + 1;
+        if (excludedLines.has(ln)) return;
+        const used = parsed.lineToUsedVars.get(ln);
+        if (!used || used.size === 0) return;
+        for (const defVar of defs) {
+          let hit = false;
+          for (const useVar of used) {
+            if (useVar === defVar || useVar.startsWith(defVar + "#")) { hit = true; break; }
+          }
+          if (hit) { out.add(ln); break; }
+        }
+      });
+      return out;
+    }
+
+    function collectImmediateChildLines(parsed, lineNo, excludedLines = new Set()) {
+      if (!parsed) return new Set();
+      return collectVarRefLinesForDefs(parsed, parsed.lineToDefinedVars.get(lineNo) || [], excludedLines);
+    }
+
+    function getPeerMatchesForLine(lineNo, parsed, peerParsed) {
+      const peerLineSet = new Set();
+      if (!parsed || !peerParsed) return peerLineSet;
+      const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
+      for (const srcLineNo of srcLineSet) {
+        const peerCodeLines = peerParsed.sourceLineToCodeLines.get(srcLineNo);
+        if (!peerCodeLines) continue;
+        for (const ln of peerCodeLines) peerLineSet.add(ln);
+      }
+      return peerLineSet;
+    }
+
+    function normalizeUseVar(useVar) {
+      if (typeof useVar !== "string") return "";
+      return useVar.replace(/#[0-9]+$/, "");
+    }
+
+    function collectParentChainNoLocLines(parsed, peerParsed, startLineNo) {
+      const out     = new Set();
+      if (!parsed || !peerParsed) return out;
+      const visited = new Set([startLineNo]);
+      const queue   = [startLineNo];
+      while (queue.length > 0) {
+        const currentLineNo = queue.shift();
+        const used      = parsed.lineToUsedVars.get(currentLineNo) || new Set();
+        const parentSet = new Set();
+        for (const useVar of used) {
+          const baseVar  = normalizeUseVar(useVar);
+          if (!baseVar) continue;
+          const defLineNo = parsed.varToDefLine.get(baseVar);
+          if (typeof defLineNo !== "number" || defLineNo === currentLineNo) continue;
+          parentSet.add(defLineNo);
+        }
+        for (const parentLineNo of Array.from(parentSet).sort((a, b) => a - b)) {
+          if (visited.has(parentLineNo)) continue;
+          visited.add(parentLineNo);
+          queue.push(parentLineNo);
+          if (getPeerMatchesForLine(parentLineNo, parsed, peerParsed).size === 0) out.add(parentLineNo);
+        }
+      }
+      return out;
+    }
+
+    function findFallbackChainToPeer(parsed, peerParsed, startLineNo) {
+      if (!parsed || !peerParsed) return null;
+      const visited = new Set([startLineNo]);
+      const queue   = [{ lineNo: startLineNo, path: [startLineNo] }];
+      while (queue.length > 0) {
+        const current      = queue.shift();
+        const defs         = parsed.lineToDefinedVars.get(current.lineNo) || [];
+        const nextLineSet  = collectVarRefLinesForDefs(parsed, defs, new Set(current.path));
+        for (const nextLineNo of Array.from(nextLineSet).sort((a, b) => a - b)) {
+          if (visited.has(nextLineNo)) continue;
+          visited.add(nextLineNo);
+          const nextPath         = current.path.concat(nextLineNo);
+          const nextPeerMatches  = getPeerMatchesForLine(nextLineNo, parsed, peerParsed);
+          if (nextPeerMatches.size > 0) {
+            return { pathLines: nextPath, matchedLineNo: nextLineNo, peerLineSet: nextPeerMatches };
+          }
+          queue.push({ lineNo: nextLineNo, path: nextPath });
+        }
+      }
+      return null;
+    }
+
+    function buildHighlightState(side, lineNo, parsed, peerParsed) {
+      const srcLineSet      = parsed.lineToSourceLines.get(lineNo) || new Set();
+      const sameFileRefLines = new Set();
+      const peerLineSet     = getPeerMatchesForLine(lineNo, parsed, peerParsed);
+      const peerVarRefLines = new Set();
+      let   ownPrimaryLineNo = lineNo;
+
+      if (peerParsed && peerLineSet.size === 0) {
+        const fallback = findFallbackChainToPeer(parsed, peerParsed, lineNo);
+        if (fallback) {
+          for (const ln of fallback.peerLineSet)  peerLineSet.add(ln);
+          for (const ln of fallback.pathLines)    sameFileRefLines.add(ln);
+          if (typeof fallback.matchedLineNo === "number") ownPrimaryLineNo = fallback.matchedLineNo;
+        }
+      }
+
+      if (peerLineSet.size > 0) {
+        for (const ln of collectImmediateChildLines(parsed, ownPrimaryLineNo, new Set([ownPrimaryLineNo])))
+          sameFileRefLines.add(ln);
+        for (const ln of collectParentChainNoLocLines(parsed, peerParsed, ownPrimaryLineNo))
+          sameFileRefLines.add(ln);
+      }
+
+      if (peerParsed && peerLineSet.size > 0) {
+        for (const peerLineNo of peerLineSet) {
+          const defs = peerParsed.lineToDefinedVars.get(peerLineNo) || [];
+          if (defs.length !== 1) continue;
+          for (const ln of collectVarRefLinesForDefs(peerParsed, defs, peerLineSet))
+            peerVarRefLines.add(ln);
+        }
+      }
+
+      return { side, lineNo, ownPrimaryLineNo, srcLineSet, peerLineSet, sameFileRefLines, peerVarRefLines };
+    }
+
+    function autoScrollToRightFirstMatch(side, lineNo, peerLineSet) {
+      if (!state.rightData) return;
+      const rightMatches = new Set();
+      if (side !== "right" && peerLineSet && peerLineSet.size > 0) {
+        for (const ln of peerLineSet) rightMatches.add(ln);
+      }
+      if (side === "right") rightMatches.add(lineNo);
+      if (rightMatches.size === 0) return;
+      const first  = Math.min(...rightMatches);
+      const target = rightViewer.querySelector(`.line[data-side="right"][data-line-no="${first}"]`);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+  </script>
+</body>
+</html>
