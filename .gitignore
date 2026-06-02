@@ -1,0 +1,12 @@
+# Dependencies
+mlir-loc-explorer/node_modules/
+
+# Build/cache
+*.log
+*.tmp
+*.swp
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
