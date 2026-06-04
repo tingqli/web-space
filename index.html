@@ -178,17 +178,31 @@
         </article>
         <article class="card">
           <h3>锁定与持续匹配</h3>
-          <p>单击锁定后切换任一侧 MLIR 文件，会尽量保留未切换侧锁定并重建高亮。</p>
+          <p>单击锁定后切换任一侧文件，会尽量保留未切换侧锁定并重建高亮。</p>
         </article>
         <article class="card">
-          <h3>右侧任意文件查看</h3>
-          <p>右侧可打开非 MLIR 文件，仅文本展示，不参与解析和匹配，便于旁路对照。</p>
+          <h3>Python 源码隐含 Loc</h3>
+          <p>左侧选择 .py 文件时，按行号隐含映射为 loc(path:line:0)，可与 MLIR 或汇编文件联动高亮。</p>
+        </article>
+        <article class="card">
+          <h3>汇编 .s Loc 解析</h3>
+          <p>支持解析 .file 与 .loc 伪指令，把汇编代码行映射回高级语言源码位置，实现与 MLIR 同级联动。</p>
         </article>
         <article class="card">
           <h3>源码跳转</h3>
           <p><code>Ctrl + 点击</code> 某一行可在 VS Code 中打开命中的 loc 源文件并跳转到行列位置。</p>
         </article>
       </div>
+    </section>
+
+    <section class="section">
+      <h2>本次更新能力</h2>
+      <ul>
+        <li>打开目录时会扫描 00_ 开头的 mlir 文件，提取 loc 中的源码路径并优先放到左侧列表</li>
+        <li>左侧默认优先选中提取出的源码文件，同时保留同目录其他 mlir 文件可选</li>
+        <li>.py 文件支持基础语法高亮，并参与悬浮匹配、点击锁定与跨侧联动高亮</li>
+        <li>.s 汇编文件支持基于 .file 和 .loc 的 loc 解析与跨侧联动高亮</li>
+      </ul>
     </section>
 
     <section class="section">

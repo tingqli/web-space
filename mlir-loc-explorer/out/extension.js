@@ -78,19 +78,41 @@ async function loadMlirFilesFromDir(panel, dirUri) {
         const files = [];
         const mlirFiles = [];
         const allFiles = [];
+        const mlirTextByName = new Map();
         for (const [name] of fileEntries) {
             const fileUri = vscode.Uri.joinPath(dirUri, name);
             const bytes = await vscode.workspace.fs.readFile(fileUri);
-            files.push({ name, text: Buffer.from(bytes).toString("utf8") });
+            const text = Buffer.from(bytes).toString("utf8");
+            files.push({ name, text });
             allFiles.push(name);
             if (name.toLowerCase().endsWith(".mlir")) {
                 mlirFiles.push(name);
+                mlirTextByName.set(name, text);
             }
+        }
+        const preferredLeftSources = await collectPreferredLeftSources(dirUri, mlirTextByName);
+        for (const sourcePath of preferredLeftSources) {
+            if (allFiles.includes(sourcePath)) {
+                continue;
+            }
+            const sourceUri = await resolveSourceUri(sourcePath);
+            if (!sourceUri) {
+                continue;
+            }
+            const bytes = await vscode.workspace.fs.readFile(sourceUri);
+            files.push({ name: sourcePath, text: Buffer.from(bytes).toString("utf8") });
+            allFiles.push(sourcePath);
         }
         files.sort((a, b) => a.name.localeCompare(b.name));
         allFiles.sort((a, b) => a.localeCompare(b));
         mlirFiles.sort((a, b) => a.localeCompare(b));
-        panel.webview.postMessage({ command: "loadFiles", files, mlirFiles, allFiles });
+        panel.webview.postMessage({
+            command: "loadFiles",
+            files,
+            mlirFiles,
+            allFiles,
+            preferredLeftFiles: preferredLeftSources,
+        });
     }
     catch (err) {
         panel.webview.postMessage({
@@ -98,6 +120,44 @@ async function loadMlirFilesFromDir(panel, dirUri) {
             message: String(err),
         });
     }
+}
+async function collectPreferredLeftSources(dirUri, mlirTextByName) {
+    const preferredMlirName = Array.from(mlirTextByName.keys())
+        .filter((name) => /^00_.*\.mlir$/i.test(name))
+        .sort((a, b) => a.localeCompare(b))[0];
+    if (!preferredMlirName) {
+        return [];
+    }
+    const mlirText = mlirTextByName.get(preferredMlirName);
+    if (!mlirText) {
+        return [];
+    }
+    const candidatePaths = extractLocFilePaths(mlirText)
+        .filter((filePath) => !filePath.includes("python/flydsl/"));
+    const results = [];
+    for (const filePath of candidatePaths) {
+        const resolved = await resolveSourceUri(filePath);
+        if (!resolved) {
+            continue;
+        }
+        results.push(filePath);
+    }
+    return Array.from(new Set(results));
+}
+function extractLocFilePaths(mlirText) {
+    const locPathRe = /loc\("((?:[^"\\]|\\.)+)":\d+:\d+\)/g;
+    const paths = new Set();
+    let match;
+    locPathRe.lastIndex = 0;
+    while ((match = locPathRe.exec(mlirText)) !== null) {
+        const rawPath = match[1]
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\");
+        if (rawPath.length > 0) {
+            paths.add(rawPath);
+        }
+    }
+    return Array.from(paths);
 }
 async function openSourceLocation(rawFile, rawLine, rawCol) {
     if (typeof rawFile !== "string" || rawFile.length === 0) {

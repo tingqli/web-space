@@ -25,6 +25,9 @@
       --syn-attr: #f78c6c;
       --syn-number: #f2cdcd;
       --syn-string: #c3e88d;
+      --syn-func: #82aaff;
+      --syn-decorator: #ff9cac;
+      --syn-builtin: #ffd580;
     }
 
     * { box-sizing: border-box; }
@@ -184,6 +187,9 @@
     .tok-attr    { color: var(--syn-attr);    font-weight: 400; }
     .tok-number  { color: var(--syn-number);  font-weight: 400; }
     .tok-string  { color: var(--syn-string);  font-weight: 400; }
+    .tok-func    { color: var(--syn-func);    font-weight: 400; }
+    .tok-decorator { color: var(--syn-decorator); font-weight: 400; }
+    .tok-builtin { color: var(--syn-builtin); font-weight: 400; }
 
     .loc-tooltip {
       position: fixed;
@@ -235,6 +241,7 @@
       files: [],
       mlirFiles: [],
       allFiles: [],
+      preferredLeftFiles: [],
       fileTextByName: new Map(),
       parsedByFile: new Map(),
       hover: null,
@@ -291,11 +298,13 @@
         const names = files.map((f) => f.name);
         const mlirFiles = msg.mlirFiles || names.filter((n) => n.toLowerCase().endsWith(".mlir"));
         const allFiles = msg.allFiles || names;
+        const preferredLeftFiles = (msg.preferredLeftFiles || []).filter((name) => allFiles.includes(name));
         const fileTextByName = new Map(files.map((f) => [f.name, f.text]));
 
         state.files = names;
         state.mlirFiles = mlirFiles;
         state.allFiles = allFiles;
+        state.preferredLeftFiles = preferredLeftFiles;
         state.fileTextByName = fileTextByName;
         state.parsedByFile.clear();
 
@@ -309,7 +318,10 @@
           return;
         }
 
-        fillSelect(leftSelect, mlirFiles, 0);
+        const leftCandidates = preferredLeftFiles.length > 0
+          ? [...preferredLeftFiles, ...mlirFiles.filter(f => !preferredLeftFiles.includes(f))]
+          : mlirFiles;
+        fillSelect(leftSelect, leftCandidates, 0);
 
         const rightCandidates = allFiles.length > 0 ? allFiles : mlirFiles;
         let rightDefaultIdx = 0;
@@ -322,7 +334,8 @@
 
         await renderBoth();
         const nonMlirCount = Math.max(0, allFiles.length - mlirFiles.length);
-        setStatus(`已加载，共 ${mlirFiles.length} 个 .mlir 文件，${nonMlirCount} 个非 .mlir 文件。`);
+        const preferredCount = preferredLeftFiles.length;
+        setStatus(`已加载，共 ${mlirFiles.length} 个 .mlir 文件，${nonMlirCount} 个非 .mlir 文件；左侧候选源码 ${preferredCount} 个。`);
         setLoading(false);
 
       } else if (msg.command === "loadStart") {
@@ -380,6 +393,63 @@
       return out.length > 0 ? out : " ";
     }
 
+    function syntaxHighlightPythonLine(line) {
+      const tokenRe = /#[^\n]*$|"""(?:[^"\\]|\\.|"(?!"")|""(?!"))*"""|'''(?:[^'\\]|\\.|'(?!'')|''(?!'))*'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b(?:False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b|\b(?:abs|all|any|bool|dict|enumerate|float|int|len|list|map|max|min|print|range|set|str|sum|tuple|zip)\b|@[A-Za-z_][A-Za-z0-9_\.]*|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()/g;
+      let out = "";
+      let last = 0;
+      let m;
+      tokenRe.lastIndex = 0;
+      while ((m = tokenRe.exec(line)) !== null) {
+        const start = m.index;
+        const tok = m[0];
+        out += escapeHtml(line.slice(last, start));
+        let cls = "";
+        if (tok.startsWith("#")) cls = "tok-comment";
+        else if (tok.startsWith('"') || tok.startsWith("'")) cls = "tok-string";
+        else if (tok.startsWith("@")) cls = "tok-decorator";
+        else if (/^\d/.test(tok)) cls = "tok-number";
+        else if (/^(abs|all|any|bool|dict|enumerate|float|int|len|list|map|max|min|print|range|set|str|sum|tuple|zip)$/.test(tok)) cls = "tok-builtin";
+        else if (/^(False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)$/.test(tok)) cls = "tok-keyword";
+        else cls = "tok-func";
+        out += `<span class="${cls}">${escapeHtml(tok)}</span>`;
+        last = tokenRe.lastIndex;
+      }
+      out += escapeHtml(line.slice(last));
+      return out.length > 0 ? out : " ";
+    }
+
+    function syntaxHighlightAsmLine(line) {
+      const tokenRe = /#.*$|\/\/.*$|"(?:[^"\\]|\\.)*"|\b(?:s|v|acc|ttmp)\d+\b|\b(?:0x[0-9A-Fa-f]+|\d+)\b|\.[A-Za-z_][A-Za-z0-9_.]*|\b(?:s_add_u32|s_sub_u32|s_mul_i32|s_mov_b32|s_waitcnt|s_branch|s_cmp|v_add_f32|v_mul_f32|v_mac_f32|v_mfma_f32_16x16x16f16|buffer_load|buffer_store|global_load|global_store|ds_read|ds_write|flat_load|flat_store)\b/g;
+      let out = "";
+      let last = 0;
+      let m;
+      tokenRe.lastIndex = 0;
+      while ((m = tokenRe.exec(line)) !== null) {
+        const start = m.index;
+        const tok = m[0];
+        out += escapeHtml(line.slice(last, start));
+        let cls = "";
+        if (tok.startsWith("#") || tok.startsWith("//")) cls = "tok-comment";
+        else if (tok.startsWith('"')) cls = "tok-string";
+        else if (tok.startsWith(".")) cls = "tok-keyword";
+        else if (/^(?:s|v|acc|ttmp)\d+$/i.test(tok)) cls = "tok-ssa";
+        else if (/^(?:0x[0-9A-Fa-f]+|\d+)$/.test(tok)) cls = "tok-number";
+        else cls = "tok-op";
+        out += `<span class="${cls}">${escapeHtml(tok)}</span>`;
+        last = tokenRe.lastIndex;
+      }
+      out += escapeHtml(line.slice(last));
+      return out.length > 0 ? out : " ";
+    }
+
+    function getFileKind(fileName) {
+      if (typeof fileName !== "string") return "text";
+      if (fileName.toLowerCase().endsWith(".mlir")) return "mlir";
+      if (fileName.toLowerCase().endsWith(".py")) return "python";
+      if (fileName.toLowerCase().endsWith(".s")) return "asm";
+      return "text";
+    }
+
     function setLoading(disabled) {
       leftSelect.disabled       = disabled;
       rightSelect.disabled      = disabled;
@@ -427,13 +497,16 @@
       });
     }
 
-    async function getParsed(fileName) {
+    async function getParsed(fileName, kind) {
       if (!fileName) return null;
-      if (!fileName.toLowerCase().endsWith(".mlir")) return null;
       if (state.parsedByFile.has(fileName)) return state.parsedByFile.get(fileName);
       const text = state.fileTextByName.get(fileName);
       if (typeof text !== "string") return null;
-      const parsed = parseMlir(text);
+      let parsed = null;
+      if (kind === "mlir") parsed = parseMlir(text);
+      else if (kind === "python") parsed = parsePythonSource(text, fileName);
+      else if (kind === "asm") parsed = parseAsmSource(text);
+      if (!parsed) return null;
       state.parsedByFile.set(fileName, parsed);
       return parsed;
     }
@@ -449,27 +522,33 @@
 
       if (!leftFile) return;
 
-      const leftParsed = await getParsed(leftFile);
-      if (!leftParsed) {
-        leftViewer.innerHTML = "";
-        rightViewer.innerHTML = "";
-        setStatus("左侧必须选择 .mlir 文件。");
-        return;
-      }
+      const leftKind = getFileKind(leftFile);
+      const rightKind = getFileKind(rightFile);
 
-      const rightIsMlir = typeof rightFile === "string" && rightFile.toLowerCase().endsWith(".mlir");
-      const rightParsed = rightIsMlir ? await getParsed(rightFile) : null;
+      const leftParsed = await getParsed(leftFile, leftKind);
+      const rightParsed = await getParsed(rightFile, rightKind);
 
       state.hover    = null;
       state.leftData  = leftParsed;
       state.rightData = rightParsed;
-      renderPane(leftViewer,  leftParsed,  "left",  rightParsed);
+      if (leftParsed) {
+        const leftHighlight = leftKind === "mlir"
+          ? syntaxHighlightMlirLine
+          : (leftKind === "python" ? syntaxHighlightPythonLine : syntaxHighlightAsmLine);
+        renderPane(leftViewer, leftParsed, "left", rightParsed, leftHighlight);
+      } else {
+        const leftText = state.fileTextByName.get(leftFile) || "";
+        renderPlainPane(leftViewer, leftText, "left", leftKind);
+      }
 
-      if (rightIsMlir && rightParsed) {
-        renderPane(rightViewer, rightParsed, "right", leftParsed);
+      if (rightParsed) {
+        const rightHighlight = rightKind === "mlir"
+          ? syntaxHighlightMlirLine
+          : (rightKind === "python" ? syntaxHighlightPythonLine : syntaxHighlightAsmLine);
+        renderPane(rightViewer, rightParsed, "right", leftParsed, rightHighlight);
       } else {
         const rightText = state.fileTextByName.get(rightFile) || "";
-        renderPlainPane(rightViewer, rightText, "right");
+        renderPlainPane(rightViewer, rightText, "right", rightKind);
       }
 
       state.currentLeftFile = leftFile;
@@ -550,7 +629,7 @@
       return candidates.length > 0 ? candidates[0] : null;
     }
 
-    function renderPlainPane(container, text, side) {
+    function renderPlainPane(container, text, side, kind = "text") {
       container.innerHTML = "";
       const lines = String(text).replace(/\r\n/g, "\n").split("\n");
       const frag = document.createDocumentFragment();
@@ -567,7 +646,11 @@
 
         const textSpan = document.createElement("span");
         textSpan.className = "line-code";
-        textSpan.innerHTML = escapeHtml(code.length > 0 ? code : " ");
+        if (kind === "python") {
+          textSpan.innerHTML = syntaxHighlightPythonLine(code);
+        } else {
+          textSpan.innerHTML = escapeHtml(code.length > 0 ? code : " ");
+        }
 
         row.appendChild(no);
         row.appendChild(textSpan);
@@ -674,12 +757,13 @@
 
       const codeLocRefRe    = /loc\(#(loc[0-9A-Za-z_]+)\)/g;
       const codeLocDirectRe = /loc\("((?:[^"\\]|\\.)*)":(\d+):(\d+)\)/g;
-      const lineToSourceLines   = new Map();
-      const lineToSourceLocs    = new Map();
+      const lineToSourceLines     = new Map();
+      const lineToSourceLocs      = new Map();
       const sourceLineToCodeLines = new Map();
-      const lineToDefinedVars   = new Map();
-      const lineToUsedVars      = new Map();
-      const varToDefLine        = new Map();
+      const sourceLocToCodeLines  = new Map();
+      const lineToDefinedVars     = new Map();
+      const lineToUsedVars        = new Map();
+      const varToDefLine          = new Map();
 
       lines.forEach((line, idx) => {
         const codeLineNo = idx + 1;
@@ -706,6 +790,14 @@
           if (!sourceLineToCodeLines.has(srcLineNo)) sourceLineToCodeLines.set(srcLineNo, new Set());
           sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
         }
+        for (const label of srcLocs) {
+          const locEntry = parseLocLabel(label);
+          if (locEntry) {
+            const key = `${locEntry.file}:${locEntry.line}`;
+            if (!sourceLocToCodeLines.has(key)) sourceLocToCodeLines.set(key, new Set());
+            sourceLocToCodeLines.get(key).add(codeLineNo);
+          }
+        }
 
         lineToDefinedVars.set(codeLineNo, parseDefinedVars(line));
         lineToUsedVars.set(codeLineNo, parseUsedVars(line));
@@ -719,9 +811,132 @@
         lineToSourceLines,
         lineToSourceLocs,
         sourceLineToCodeLines,
+        sourceLocToCodeLines,
         lineToDefinedVars,
         lineToUsedVars,
         varToDefLine,
+      };
+    }
+
+    // ── Synthetic parsed structure for Python source files ─────────────────────
+    function parsePythonSource(text, filePath) {
+      const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+      const lineToSourceLines    = new Map();
+      const lineToSourceLocs     = new Map();
+      const sourceLineToCodeLines = new Map();
+      const sourceLocToCodeLines  = new Map();
+      const lineToDefinedVars    = new Map();
+      const lineToUsedVars       = new Map();
+      const varToDefLine         = new Map();
+      lines.forEach((_, idx) => {
+        const n = idx + 1;
+        lineToSourceLines.set(n, new Set([n]));
+        lineToSourceLocs.set(n, new Set([`${filePath}:${n}:0`]));
+        sourceLineToCodeLines.set(n, new Set([n]));
+        sourceLocToCodeLines.set(`${filePath}:${n}`, new Set([n]));
+        lineToDefinedVars.set(n, []);
+        lineToUsedVars.set(n, new Set());
+      });
+      return {
+        lines,
+        lineToSourceLines,
+        lineToSourceLocs,
+        sourceLineToCodeLines,
+        sourceLocToCodeLines,
+        lineToDefinedVars,
+        lineToUsedVars,
+        varToDefLine,
+        isPythonSource: true,
+        filePath,
+      };
+    }
+
+    // ── Assembly parser (.s with .file/.loc) ────────────────────────────────
+    function parseAsmSource(text) {
+      const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+      const lineToSourceLines = new Map();
+      const lineToSourceLocs = new Map();
+      const sourceLineToCodeLines = new Map();
+      const sourceLocToCodeLines = new Map();
+      const lineToDefinedVars = new Map();
+      const lineToUsedVars = new Map();
+      const varToDefLine = new Map();
+
+      const fileIndexToPath = new Map();
+      let currentLocFile = null;
+      let currentLocLine = null;
+      let currentLocCol = 0;
+
+      function normalizeAsmPath(dirPart, filePart) {
+        if (typeof filePart === "string" && filePart.startsWith("/")) {
+          return filePart;
+        }
+        if (!dirPart) return filePart || "";
+        if (!filePart) return dirPart;
+        return dirPart.endsWith("/") ? `${dirPart}${filePart}` : `${dirPart}/${filePart}`;
+      }
+
+      lines.forEach((line, idx) => {
+        const codeLineNo = idx + 1;
+        const srcLines = new Set();
+        const srcLocs = new Set();
+
+        const fileMatch = line.match(/^\s*\.file\s+(\d+)\s+"([^"]+)"(?:\s+"([^"]+)")?/);
+        if (fileMatch) {
+          const fileIndex = Number(fileMatch[1]);
+          const fullPath = normalizeAsmPath(fileMatch[2], fileMatch[3]);
+          if (Number.isFinite(fileIndex) && fullPath.length > 0) {
+            fileIndexToPath.set(fileIndex, fullPath);
+          }
+        }
+
+        const locMatch = line.match(/^\s*\.loc\s+(\d+)\s+(\d+)\s+(\d+)/);
+        if (locMatch) {
+          const fileIndex = Number(locMatch[1]);
+          const locLine = Number(locMatch[2]);
+          const locCol = Number(locMatch[3]);
+          const mappedFile = fileIndexToPath.get(fileIndex);
+          if (mappedFile && Number.isFinite(locLine)) {
+            currentLocFile = mappedFile;
+            currentLocLine = locLine;
+            currentLocCol = Number.isFinite(locCol) ? locCol : 0;
+          }
+        }
+
+        if (currentLocFile && Number.isFinite(currentLocLine)) {
+          srcLines.add(currentLocLine);
+          srcLocs.add(`${currentLocFile}:${currentLocLine}:${currentLocCol}`);
+        }
+
+        lineToSourceLines.set(codeLineNo, srcLines);
+        lineToSourceLocs.set(codeLineNo, srcLocs);
+
+        for (const srcLineNo of srcLines) {
+          if (!sourceLineToCodeLines.has(srcLineNo)) sourceLineToCodeLines.set(srcLineNo, new Set());
+          sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
+        }
+        for (const label of srcLocs) {
+          const locEntry = parseLocLabel(label);
+          if (!locEntry) continue;
+          const key = `${locEntry.file}:${locEntry.line}`;
+          if (!sourceLocToCodeLines.has(key)) sourceLocToCodeLines.set(key, new Set());
+          sourceLocToCodeLines.get(key).add(codeLineNo);
+        }
+
+        lineToDefinedVars.set(codeLineNo, []);
+        lineToUsedVars.set(codeLineNo, new Set());
+      });
+
+      return {
+        lines,
+        lineToSourceLines,
+        lineToSourceLocs,
+        sourceLineToCodeLines,
+        sourceLocToCodeLines,
+        lineToDefinedVars,
+        lineToUsedVars,
+        varToDefLine,
+        isAsmSource: true,
       };
     }
 
@@ -737,6 +952,8 @@
 
     function showLocTooltip(parsed, lineNo, clientX, clientY) {
       if (!parsed) return;
+      // Python source files are their own source — no useful loc tooltip to show
+      if (parsed.isPythonSource) { locTooltip.style.display = "none"; return; }
       const sorted = getSortedLocEntries(parsed, lineNo).map((entry) => `${entry.file}:${entry.line}:${entry.col}`);
       if (sorted.length === 0) { locTooltip.style.display = "none"; return; }
       locTooltip.innerHTML = sorted.map((s) => escapeHtml(s)).join("<br>");
@@ -747,9 +964,10 @@
     function hideLocTooltip() { if (locTooltip) locTooltip.style.display = "none"; }
 
     // ── Rendering ─────────────────────────────────────────────────────────────
-    function renderPane(container, parsed, side, peerParsed) {
+    function renderPane(container, parsed, side, peerParsed, highlightFn) {
       container.innerHTML = "";
       if (!parsed) return;
+      const hl = highlightFn || syntaxHighlightMlirLine;
       const frag = document.createDocumentFragment();
       parsed.lines.forEach((code, idx) => {
         const codeLineNo = idx + 1;
@@ -764,7 +982,7 @@
 
         const text = document.createElement("span");
         text.className  = "line-code";
-        text.innerHTML  = syntaxHighlightMlirLine(code);
+        text.innerHTML  = hl(code);
 
         row.appendChild(no);
         row.appendChild(text);
@@ -890,6 +1108,22 @@
     function getPeerMatchesForLine(lineNo, parsed, peerParsed) {
       const peerLineSet = new Set();
       if (!parsed || !peerParsed) return peerLineSet;
+
+      // File-path-aware matching: use sourceLocToCodeLines when available on peer
+      if (peerParsed.sourceLocToCodeLines) {
+        const srcLocs = parsed.lineToSourceLocs?.get(lineNo) || new Set();
+        for (const label of srcLocs) {
+          const entry = parseLocLabel(label);
+          if (!entry) continue;
+          const key = `${entry.file}:${entry.line}`;
+          const peerCodeLines = peerParsed.sourceLocToCodeLines.get(key);
+          if (!peerCodeLines) continue;
+          for (const ln of peerCodeLines) peerLineSet.add(ln);
+        }
+        if (peerLineSet.size > 0) return peerLineSet;
+      }
+
+      // Fallback: line-number-only matching (original behaviour)
       const srcLineSet = parsed.lineToSourceLines.get(lineNo) || new Set();
       for (const srcLineNo of srcLineSet) {
         const peerCodeLines = peerParsed.sourceLineToCodeLines.get(srcLineNo);
