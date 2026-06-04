@@ -47,9 +47,66 @@
     .toolbar {
       display: flex;
       align-items: center;
+      justify-content: space-between;
       padding: 6px 8px;
       border-bottom: 1px solid var(--border);
       background: #10131a;
+    }
+
+    .search-widget {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 4px;
+      border: 1px solid #34405a;
+      border-radius: 6px;
+      background: #151c2b;
+    }
+
+    .search-widget.visible {
+      display: inline-flex;
+    }
+
+    .search-input {
+      width: 180px;
+      background: #0f1522;
+      color: var(--text);
+      border: 1px solid #3a4766;
+      border-radius: 4px;
+      padding: 4px 6px;
+      font-size: 12px;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent);
+    }
+
+    .search-count {
+      min-width: 52px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      user-select: none;
+    }
+
+    .search-btn {
+      min-width: 28px;
+      padding: 4px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .search-btn.toggle.active {
+      border-color: var(--accent);
+      background: #1f3357;
+      color: #d9e8ff;
+    }
+
+    .search-scope {
+      min-width: 42px;
+      text-align: center;
     }
 
     .toolbar label { font-size: 12px; color: var(--muted); }
@@ -178,6 +235,8 @@
     .line.active        { background: var(--active); }
     .line.peer-active   { background: var(--active-peer); }
     .line.var-ref-active { background: var(--active-var-ref); }
+    .line.search-hit .line-code { box-shadow: inset 0 -1px 0 rgba(124,184,255,0.75); }
+    .line.search-active .line-code { box-shadow: inset 0 -2px 0 #ffd166; }
 
     .tok-comment { color: var(--syn-comment); font-weight: 400; }
     .tok-keyword { color: var(--syn-keyword); font-weight: 400; }
@@ -212,6 +271,16 @@
 <body>
   <div class="toolbar">
     <span id="status" class="hint">请在命令执行后等待目录加载。鼠标悬停联动，单击锁定。</span>
+    <div id="searchWidget" class="search-widget" role="search" aria-label="搜索">
+      <button id="searchScopeBtn" class="search-btn search-scope" type="button" title="搜索目标窗格">左侧</button>
+      <input id="searchInput" class="search-input" type="text" placeholder="搜索" aria-label="搜索文本" />
+      <span id="searchCount" class="search-count">0/0</span>
+      <button id="searchPrevBtn" class="search-btn" type="button" title="上一个匹配">↑</button>
+      <button id="searchNextBtn" class="search-btn" type="button" title="下一个匹配">↓</button>
+      <button id="searchCaseBtn" class="search-btn toggle" type="button" title="区分大小写">Aa</button>
+      <button id="searchWordBtn" class="search-btn toggle" type="button" title="全字匹配">W</button>
+      <button id="searchCloseBtn" class="search-btn" type="button" title="关闭搜索">✕</button>
+    </div>
   </div>
 
   <div id="panes" class="panes">
@@ -250,6 +319,16 @@
       rightData: null,
       currentLeftFile: null,
       currentRightFile: null,
+      lastInteractedSide: "left",
+      search: {
+        visible: false,
+        query: "",
+        matchCase: false,
+        wholeWord: false,
+        targetSide: "left",
+        matches: [],
+        activeIndex: -1,
+      },
     };
 
     const leftSelect        = document.getElementById("leftFileSelect");
@@ -260,6 +339,15 @@
     const splitterEl        = document.getElementById("splitter");
     const statusEl          = document.getElementById("status");
     const locTooltip        = document.getElementById("locTooltip");
+    const searchWidget      = document.getElementById("searchWidget");
+    const searchScopeBtn    = document.getElementById("searchScopeBtn");
+    const searchInput       = document.getElementById("searchInput");
+    const searchCount       = document.getElementById("searchCount");
+    const searchPrevBtn     = document.getElementById("searchPrevBtn");
+    const searchNextBtn     = document.getElementById("searchNextBtn");
+    const searchCaseBtn     = document.getElementById("searchCaseBtn");
+    const searchWordBtn     = document.getElementById("searchWordBtn");
+    const searchCloseBtn    = document.getElementById("searchCloseBtn");
 
     function getSortedLocEntries(parsed, lineNo) {
       if (!parsed) return [];
@@ -289,6 +377,43 @@
 
     leftSelect.addEventListener("change",  renderBoth);
     rightSelect.addEventListener("change", renderBoth);
+    leftViewer.addEventListener("mousedown", () => { state.lastInteractedSide = "left"; });
+    rightViewer.addEventListener("mousedown", () => { state.lastInteractedSide = "right"; });
+
+    searchPrevBtn.addEventListener("click", () => navigateSearch(-1));
+    searchNextBtn.addEventListener("click", () => navigateSearch(1));
+    searchCloseBtn.addEventListener("click", hideSearchWidget);
+    searchCaseBtn.addEventListener("click", () => {
+      state.search.matchCase = !state.search.matchCase;
+      refreshSearchMatches(true);
+      updateSearchControls();
+    });
+    searchWordBtn.addEventListener("click", () => {
+      state.search.wholeWord = !state.search.wholeWord;
+      refreshSearchMatches(true);
+      updateSearchControls();
+    });
+    searchScopeBtn.addEventListener("click", () => {
+      state.search.targetSide = state.search.targetSide === "left" ? "right" : "left";
+      refreshSearchMatches(true);
+      updateSearchControls();
+    });
+    searchInput.addEventListener("input", () => {
+      state.search.query = searchInput.value || "";
+      refreshSearchMatches(false);
+      updateSearchControls();
+    });
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        navigateSearch(event.shiftKey ? -1 : 1);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        hideSearchWidget();
+      }
+    });
+
+    document.addEventListener("keydown", onGlobalKeydown);
 
     // ── Message handler (extension host → webview) ─────────────────────────────
     window.addEventListener("message", async (event) => {
@@ -442,11 +567,46 @@
       return out.length > 0 ? out : " ";
     }
 
+    function syntaxHighlightLlvmLine(line) {
+      // Bare block label like "127:" or "entry:"
+      const labelOnly = line.match(/^(\s*)([A-Za-z0-9_.$][-A-Za-z0-9_.$]*:)(\s*(?:;.*)?)$/);
+      if (labelOnly) {
+        return escapeHtml(labelOnly[1]) +
+          `<span class="tok-func">${escapeHtml(labelOnly[2])}</span>` +
+          `<span class="tok-comment">${escapeHtml(labelOnly[3])}</span>`;
+      }
+      const tokenRe = /;.*$|"(?:[^"\\]|\\.)*"|(!(?:\d+|DI\w*|\{[^}]*\}))|%[-A-Za-z0-9.$_]+|@[-A-Za-z0-9.$_"]+|#\d+|\b0x[0-9A-Fa-f]+\b|-?\b\d+(?:\.\d+(?:e[+-]?\d+)?|e[+-]?\d+)?\b|\b(?:define|declare|target|datalayout|triple|source_filename|attributes|module|metadata|distinct|null|undef|zeroinitializer|true|false|align|volatile|atomic|syncscope|inbounds|nuw|nsw|exact|nnan|ninf|nsz|arcp|contract|afn|reassoc|fast|to|from|global|constant|external|internal|private|linkonce|weak|appending|common|extern_weak|unnamed_addr|local_unnamed_addr|thread_local|addrspace|range|type|call|ret|br|switch|indirectbr|invoke|resume|unreachable|alloca|load|store|fence|cmpxchg|atomicrmw|getelementptr|trunc|zext|sext|fptrunc|fpext|fptoui|fptosi|uitofp|sitofp|ptrtoint|inttoptr|bitcast|addrspacecast|add|fadd|sub|fsub|mul|fmul|udiv|sdiv|fdiv|urem|srem|frem|shl|lshr|ashr|and|or|xor|extractelement|insertelement|shufflevector|extractvalue|insertvalue|phi|select|icmp|fcmp|va_arg|landingpad|catchpad|cleanuppad|freeze|acquire|release|acq_rel|seq_cst|singlethread|eq|ne|ugt|uge|ult|ule|sgt|sge|slt|sle|oeq|ogt|oge|olt|ole|one|ord|ueq|une|uno)\b|\b(?:void|ptr|half|bfloat|float|double|x86_fp80|ppc_fp128|x86_mmx|label|token|opaque|i1|i8|i16|i32|i64|i128)\b/g;
+      let out = "";
+      let last = 0;
+      let m;
+      tokenRe.lastIndex = 0;
+      while ((m = tokenRe.exec(line)) !== null) {
+        const start = m.index;
+        const tok = m[0];
+        out += escapeHtml(line.slice(last, start));
+        let cls = "";
+        if (tok.startsWith(";")) cls = "tok-comment";
+        else if (tok.startsWith('"')) cls = "tok-string";
+        else if (tok.startsWith("!")) cls = "tok-attr";
+        else if (tok.startsWith("%")) cls = "tok-ssa";
+        else if (tok.startsWith("@")) cls = "tok-func";
+        else if (tok.startsWith("#")) cls = "tok-attr";
+        else if (/^-?(?:0x[0-9A-Fa-f]+|\d)/.test(tok)) cls = "tok-number";
+        else if (/^(?:void|ptr|half|bfloat|float|double|x86_fp80|ppc_fp128|x86_mmx|label|token|opaque|i\d+)$/.test(tok)) cls = "tok-type";
+        else cls = "tok-keyword";
+        out += `<span class="${cls}">${escapeHtml(tok)}</span>`;
+        last = tokenRe.lastIndex;
+      }
+      out += escapeHtml(line.slice(last));
+      return out.length > 0 ? out : " ";
+    }
+
     function getFileKind(fileName) {
       if (typeof fileName !== "string") return "text";
       if (fileName.toLowerCase().endsWith(".mlir")) return "mlir";
       if (fileName.toLowerCase().endsWith(".py")) return "python";
       if (fileName.toLowerCase().endsWith(".s")) return "asm";
+      if (fileName.toLowerCase().endsWith(".ll")) return "llvm";
       return "text";
     }
 
@@ -506,6 +666,7 @@
       if (kind === "mlir") parsed = parseMlir(text);
       else if (kind === "python") parsed = parsePythonSource(text, fileName);
       else if (kind === "asm") parsed = parseAsmSource(text);
+      else if (kind === "llvm") parsed = parseLlvmIr(text);
       if (!parsed) return null;
       state.parsedByFile.set(fileName, parsed);
       return parsed;
@@ -534,7 +695,9 @@
       if (leftParsed) {
         const leftHighlight = leftKind === "mlir"
           ? syntaxHighlightMlirLine
-          : (leftKind === "python" ? syntaxHighlightPythonLine : syntaxHighlightAsmLine);
+          : leftKind === "python" ? syntaxHighlightPythonLine
+          : leftKind === "llvm" ? syntaxHighlightLlvmLine
+          : syntaxHighlightAsmLine;
         renderPane(leftViewer, leftParsed, "left", rightParsed, leftHighlight);
       } else {
         const leftText = state.fileTextByName.get(leftFile) || "";
@@ -544,7 +707,9 @@
       if (rightParsed) {
         const rightHighlight = rightKind === "mlir"
           ? syntaxHighlightMlirLine
-          : (rightKind === "python" ? syntaxHighlightPythonLine : syntaxHighlightAsmLine);
+          : rightKind === "python" ? syntaxHighlightPythonLine
+          : rightKind === "llvm" ? syntaxHighlightLlvmLine
+          : syntaxHighlightAsmLine;
         renderPane(rightViewer, rightParsed, "right", leftParsed, rightHighlight);
       } else {
         const rightText = state.fileTextByName.get(rightFile) || "";
@@ -564,6 +729,168 @@
         rightParsed
       );
       applyHighlight();
+      if (state.search.visible) {
+        refreshSearchMatches(true);
+        updateSearchControls();
+      }
+    }
+
+    function onGlobalKeydown(event) {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        showSearchWidget();
+        return;
+      }
+      if (!state.search.visible) return;
+      if (event.key === "F3") {
+        event.preventDefault();
+        navigateSearch(event.shiftKey ? -1 : 1);
+      } else if (event.key === "Escape" && document.activeElement !== searchInput) {
+        event.preventDefault();
+        hideSearchWidget();
+      }
+    }
+
+    function getLinesForSide(side) {
+      const fileName = side === "left" ? leftSelect.value : rightSelect.value;
+      const parsed = side === "left" ? state.leftData : state.rightData;
+      if (parsed && Array.isArray(parsed.lines)) return parsed.lines;
+      const text = state.fileTextByName.get(fileName);
+      return typeof text === "string" ? String(text).replace(/\r\n/g, "\n").split("\n") : [];
+    }
+
+    function isWordChar(ch) {
+      return typeof ch === "string" && /[A-Za-z0-9_]/.test(ch);
+    }
+
+    function collectLineMatches(line, query, matchCase, wholeWord) {
+      const out = [];
+      if (!query) return out;
+      const haystack = matchCase ? line : line.toLowerCase();
+      const needle = matchCase ? query : query.toLowerCase();
+      if (!needle) return out;
+
+      let from = 0;
+      while (from <= haystack.length) {
+        const idx = haystack.indexOf(needle, from);
+        if (idx < 0) break;
+        const end = idx + needle.length;
+        let ok = true;
+        if (wholeWord) {
+          const left = idx > 0 ? line[idx - 1] : "";
+          const right = end < line.length ? line[end] : "";
+          ok = !isWordChar(left) && !isWordChar(right);
+        }
+        if (ok) out.push({ start: idx, end });
+        from = idx + Math.max(1, needle.length);
+      }
+      return out;
+    }
+
+    function showSearchWidget() {
+      state.search.visible = true;
+      state.search.targetSide = state.lastInteractedSide || "left";
+      searchWidget.classList.add("visible");
+      searchInput.value = state.search.query;
+      refreshSearchMatches(false);
+      updateSearchControls();
+      searchInput.focus();
+      searchInput.select();
+    }
+
+    function hideSearchWidget() {
+      state.search.visible = false;
+      state.search.matches = [];
+      state.search.activeIndex = -1;
+      searchWidget.classList.remove("visible");
+      clearSearchDecorations();
+      updateSearchControls();
+    }
+
+    function refreshSearchMatches(keepCurrent) {
+      const side = state.search.targetSide;
+      const query = state.search.query || "";
+      const lines = getLinesForSide(side);
+      const prev = keepCurrent && state.search.activeIndex >= 0
+        ? state.search.matches[state.search.activeIndex]
+        : null;
+
+      const matches = [];
+      if (query.length > 0) {
+        lines.forEach((line, idx) => {
+          const hitRanges = collectLineMatches(line, query, state.search.matchCase, state.search.wholeWord);
+          for (const range of hitRanges) {
+            matches.push({ lineNo: idx + 1, start: range.start, end: range.end });
+          }
+        });
+      }
+
+      state.search.matches = matches;
+      if (matches.length === 0) {
+        state.search.activeIndex = -1;
+      } else if (prev) {
+        const found = matches.findIndex((m) => m.lineNo === prev.lineNo && m.start === prev.start && m.end === prev.end);
+        state.search.activeIndex = found >= 0 ? found : Math.min(state.search.activeIndex, matches.length - 1);
+        if (state.search.activeIndex < 0) state.search.activeIndex = 0;
+      } else {
+        state.search.activeIndex = 0;
+      }
+      applySearchDecorations();
+    }
+
+    function clearSearchDecorations() {
+      document.querySelectorAll(".line.search-hit, .line.search-active").forEach((el) => {
+        el.classList.remove("search-hit", "search-active");
+      });
+    }
+
+    function applySearchDecorations() {
+      clearSearchDecorations();
+      if (!state.search.visible) return;
+      const side = state.search.targetSide;
+      const viewer = side === "left" ? leftViewer : rightViewer;
+      const lines = new Set(state.search.matches.map((m) => m.lineNo));
+      for (const lineNo of lines) {
+        const el = viewer.querySelector(`.line[data-side="${side}"][data-line-no="${lineNo}"]`);
+        if (el) el.classList.add("search-hit");
+      }
+      if (state.search.activeIndex >= 0 && state.search.activeIndex < state.search.matches.length) {
+        const active = state.search.matches[state.search.activeIndex];
+        const activeEl = viewer.querySelector(`.line[data-side="${side}"][data-line-no="${active.lineNo}"]`);
+        if (activeEl) activeEl.classList.add("search-active");
+      }
+    }
+
+    function scrollToActiveSearchMatch() {
+      if (!state.search.visible) return;
+      if (state.search.activeIndex < 0 || state.search.activeIndex >= state.search.matches.length) return;
+      const side = state.search.targetSide;
+      const viewer = side === "left" ? leftViewer : rightViewer;
+      const active = state.search.matches[state.search.activeIndex];
+      const el = viewer.querySelector(`.line[data-side="${side}"][data-line-no="${active.lineNo}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+
+    function navigateSearch(delta) {
+      const total = state.search.matches.length;
+      if (total === 0) {
+        updateSearchControls();
+        return;
+      }
+      const next = (state.search.activeIndex + delta + total) % total;
+      state.search.activeIndex = next;
+      applySearchDecorations();
+      updateSearchControls();
+      scrollToActiveSearchMatch();
+    }
+
+    function updateSearchControls() {
+      searchCaseBtn.classList.toggle("active", state.search.matchCase);
+      searchWordBtn.classList.toggle("active", state.search.wholeWord);
+      searchScopeBtn.textContent = state.search.targetSide === "left" ? "左侧" : "右侧";
+      const total = state.search.matches.length;
+      const current = state.search.activeIndex >= 0 ? (state.search.activeIndex + 1) : 0;
+      searchCount.textContent = `${current}/${total}`;
     }
 
     function rebuildLockForFileSwitch(
@@ -937,6 +1264,156 @@
         lineToUsedVars,
         varToDefLine,
         isAsmSource: true,
+      };
+    }
+
+    // ── LLVM IR parser (.ll with !dbg !N DILocation metadata) ─────────────────
+    function parseLlvmIr(text) {
+      const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+      const metaById = new Map(); // "!N" -> parsed metadata object
+
+      // ---- Pass 1: collect metadata definitions (join continuation lines) ----
+      // Metadata entries can span lines when strings contain newlines; we join
+      // continuation lines by checking whether open-parens are balanced.
+      function flushMeta(str) {
+        if (!str) return;
+        const defRe = /^(!\d+)\s*=\s*(?:distinct\s+)?(!\w+)\s*\((.*)\)\s*$/;
+        const m = str.match(defRe);
+        if (!m) return;
+        const id   = m[1];
+        const kind = m[2];
+        const body = m[3];
+        // Helper: extract a named attribute value from the body string.
+        // Handles: key: "string", key: !N, key: N, key: keyword
+        function attr(key) {
+          const re = new RegExp(`\\b${key}\\s*:\\s*(?:"([^"]*)"|(![\\w.]+|!\\d+)|(\\w+))`);
+          const am = body.match(re);
+          if (!am) return null;
+          if (am[1] !== undefined) return am[1];
+          if (am[2] !== undefined) return am[2];
+          return am[3] || null;
+        }
+        const obj = { kind };
+        if (kind === "!DIFile") {
+          const fname = attr("filename") || "";
+          const dir   = attr("directory") || "";
+          obj.path = (fname.startsWith("/") || !dir) ? fname : `${dir}/${fname}`;
+        } else if (kind === "!DILocation") {
+          const ln = attr("line");
+          const col = attr("column");
+          obj.line    = ln  ? Number(ln)  : null;
+          obj.col     = col ? Number(col) : 0;
+          obj.scope   = attr("scope");
+          obj.inlinedAt = attr("inlinedAt");
+        } else {
+          // DISubprogram, DILexicalBlock, DILexicalBlockFile, etc.
+          obj.file  = attr("file");
+          obj.scope = attr("scope");
+        }
+        metaById.set(id, obj);
+      }
+
+      let acc = null;
+      let parenDepth = 0;
+      for (const line of lines) {
+        if (/^!\d+\s*=/.test(line)) {
+          flushMeta(acc);
+          acc = line;
+          parenDepth = (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+        } else if (acc !== null && parenDepth > 0) {
+          acc += " " + line.trim();
+          parenDepth += (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+        } else {
+          flushMeta(acc);
+          acc = null;
+          parenDepth = 0;
+        }
+      }
+      flushMeta(acc);
+
+      // ---- Resolve the source file path by traversing the scope chain ----
+      function resolveFile(id, depth) {
+        if (!id || (depth || 0) > 8) return null;
+        const meta = metaById.get(id);
+        if (!meta) return null;
+        if (meta.kind === "!DIFile") return meta.path || null;
+        if (meta.file)  return resolveFile(meta.file,  (depth || 0) + 1);
+        if (meta.scope) return resolveFile(meta.scope, (depth || 0) + 1);
+        return null;
+      }
+
+      // ---- Resolve !DILocation -> {file, line, col} ----
+      function resolveDILocation(id) {
+        const meta = metaById.get(id);
+        if (!meta || meta.kind !== "!DILocation") return null;
+        if (!Number.isFinite(meta.line)) return null;
+        const file = resolveFile(meta.scope);
+        if (!file) return null;
+        return { file, line: meta.line, col: meta.col || 0 };
+      }
+
+      // ---- Pass 2: process instruction lines for !dbg refs ----
+      const lineToSourceLines     = new Map();
+      const lineToSourceLocs      = new Map();
+      const sourceLineToCodeLines = new Map();
+      const sourceLocToCodeLines  = new Map();
+      const lineToDefinedVars     = new Map();
+      const lineToUsedVars        = new Map();
+      const varToDefLine          = new Map();
+
+      const dbgRefRe = /!dbg\s+(!\d+)/g;
+      const ssaDefRe = /^\s+(%[-A-Za-z0-9.$_]+)\s*=/;
+      const ssaUseRe = /%[-A-Za-z0-9.$_]+/g;
+
+      lines.forEach((line, idx) => {
+        const codeLineNo = idx + 1;
+        const srcLines = new Set();
+        const srcLocs  = new Set();
+        let rm;
+        dbgRefRe.lastIndex = 0;
+        while ((rm = dbgRefRe.exec(line)) !== null) {
+          const loc = resolveDILocation(rm[1]);
+          if (loc && Number.isFinite(loc.line)) {
+            srcLines.add(loc.line);
+            srcLocs.add(`${loc.file}:${loc.line}:${loc.col}`);
+          }
+        }
+        lineToSourceLines.set(codeLineNo, srcLines);
+        lineToSourceLocs.set(codeLineNo, srcLocs);
+        for (const srcLineNo of srcLines) {
+          if (!sourceLineToCodeLines.has(srcLineNo)) sourceLineToCodeLines.set(srcLineNo, new Set());
+          sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
+        }
+        for (const label of srcLocs) {
+          const locEntry = parseLocLabel(label);
+          if (locEntry) {
+            const key = `${locEntry.file}:${locEntry.line}`;
+            if (!sourceLocToCodeLines.has(key)) sourceLocToCodeLines.set(key, new Set());
+            sourceLocToCodeLines.get(key).add(codeLineNo);
+          }
+        }
+        const defMatch = line.match(ssaDefRe);
+        lineToDefinedVars.set(codeLineNo, defMatch ? [defMatch[1]] : []);
+        const usedVars = new Set();
+        ssaUseRe.lastIndex = 0;
+        let um;
+        while ((um = ssaUseRe.exec(line)) !== null) usedVars.add(um[0]);
+        lineToUsedVars.set(codeLineNo, usedVars);
+        for (const defVar of lineToDefinedVars.get(codeLineNo) || []) {
+          if (!varToDefLine.has(defVar)) varToDefLine.set(defVar, codeLineNo);
+        }
+      });
+
+      return {
+        lines,
+        lineToSourceLines,
+        lineToSourceLocs,
+        sourceLineToCodeLines,
+        sourceLocToCodeLines,
+        lineToDefinedVars,
+        lineToUsedVars,
+        varToDefLine,
+        isLlvmIr: true,
       };
     }
 
