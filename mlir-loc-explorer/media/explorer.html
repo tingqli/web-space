@@ -1036,7 +1036,7 @@
       state.locked = buildHighlightState(side, lineNo, parsed, peerParsed);
       state.hover  = null;
       applyHighlight();
-      autoScrollToRightFirstMatch(side, state.locked.ownPrimaryLineNo, state.locked.peerLineSet);
+      autoScrollToTargetPane(side, state.locked.peerLineSet);
       setStatus("已锁定当前高亮；再次点击同一行可取消锁定。");
     }
 
@@ -1221,17 +1221,74 @@
       return { side, lineNo, ownPrimaryLineNo, srcLineSet, peerLineSet, sameFileRefLines, peerVarRefLines };
     }
 
-    function autoScrollToRightFirstMatch(side, lineNo, peerLineSet) {
-      if (!state.rightData) return;
-      const rightMatches = new Set();
-      if (side !== "right" && peerLineSet && peerLineSet.size > 0) {
-        for (const ln of peerLineSet) rightMatches.add(ln);
+    function autoScrollToTargetPane(side, peerLineSet) {
+      if (!peerLineSet || peerLineSet.size === 0) return;
+      
+      const targetSide = side === "left" ? "right" : "left";
+      const targetViewer = targetSide === "left" ? leftViewer : rightViewer;
+      const targetParsed = targetSide === "left" ? state.leftData : state.rightData;
+
+      if (!targetParsed || !Array.isArray(targetParsed.lines)) return;
+
+      const targetLines = Array.from(peerLineSet)
+        .filter((n) => Number.isFinite(n) && n >= 1 && n <= targetParsed.lines.length)
+        .sort((a, b) => a - b);
+        
+      if (targetLines.length === 0) return;
+
+      const lineToScroll = findNearestVisibleLine(targetViewer, targetSide, targetLines);
+      if (lineToScroll) {
+        lineToScroll.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
       }
-      if (side === "right") rightMatches.add(lineNo);
-      if (rightMatches.size === 0) return;
-      const first  = Math.min(...rightMatches);
-      const target = rightViewer.querySelector(`.line[data-side="right"][data-line-no="${first}"]`);
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+
+    function findNearestVisibleLine(container, side, lineNumbers) {
+      if (lineNumbers.length === 0) return null;
+      if (lineNumbers.length === 1) {
+        return container.querySelector(`.line[data-side="${side}"][data-line-no="${lineNumbers[0]}"]`);
+      }
+
+      const lineElements = lineNumbers.map((lineNo) =>
+        container.querySelector(`.line[data-side="${side}"][data-line-no="${lineNo}"]`)
+      ).filter((el) => el !== null);
+      
+      if (lineElements.length === 0) return null;
+      
+      const containerRect = container.getBoundingClientRect();
+      const containerTop = containerRect.top;
+      const containerBottom = containerRect.bottom;
+      const containerCenter = (containerTop + containerBottom) / 2;
+
+      const visibleElements = lineElements.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.top < containerBottom && rect.bottom > containerTop;
+      });
+
+      if (visibleElements.length > 0) {
+        return visibleElements[0];
+      }
+
+      let nearestElement = lineElements[0];
+      let minDistance = Math.abs(lineElements[0].getBoundingClientRect().top - containerCenter);
+
+      for (let i = 1; i < lineElements.length; i++) {
+        const rect = lineElements[i].getBoundingClientRect();
+        let distance;
+        if (rect.top < containerTop) {
+          distance = containerTop - rect.bottom;
+        } else if (rect.bottom > containerBottom) {
+          distance = rect.top - containerBottom;
+        } else {
+          distance = 0;
+        }
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearestElement = lineElements[i];
+        }
+      }
+
+      return nearestElement;
     }
   </script>
 </body>
