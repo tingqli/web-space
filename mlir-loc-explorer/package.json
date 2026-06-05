@@ -2,7 +2,23 @@
   "name": "mlir-loc-explorer",
   "displayName": "MLIR Loc Explorer",
   "description": "Side-by-side MLIR IR viewer with loc-based cross-file linking",
+  "publisher": "ltq18",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tingqli/web-space.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tingqli/web-space/issues"
+  },
+  "homepage": "https://github.com/tingqli/web-space#readme",
+  "keywords": [
+    "mlir",
+    "ir",
+    "loc",
+    "viewer"
+  ],
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -31,13 +47,16 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npx vsce package"
+    "package": "npx @vscode/vsce package",
+    "publish": "npx @vscode/vsce publish"
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
     "@types/node": "^16.0.0",
+    "@vscode/vsce": "^3.6.2",
     "typescript": "^4.9.5"
   }
 }

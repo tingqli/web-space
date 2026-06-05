@@ -1,0 +1,8 @@
+src/**
+tsconfig.json
+.vscode/**
+.vscode-test/**
+node_modules/**
+!.vscodeignore
+!media/**
+!out/**
