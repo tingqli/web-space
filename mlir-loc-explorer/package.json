@@ -3,7 +3,7 @@
   "displayName": "MLIR Loc Explorer",
   "description": "Side-by-side MLIR IR viewer with loc-based cross-file linking",
   "publisher": "ltqusst",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "MIT",
   "repository": {
     "type": "git",
