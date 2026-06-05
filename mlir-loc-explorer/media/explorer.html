@@ -362,6 +362,38 @@
         });
     }
 
+    function getLocChainsForLine(parsed, lineNo) {
+      if (!parsed) return [];
+      const chains = parsed.lineToSourceLocChains?.get(lineNo);
+      if (!Array.isArray(chains)) return [];
+      return chains
+        .map((chain) => {
+          if (!Array.isArray(chain)) return [];
+          return chain
+            .map((entry) => {
+              if (!entry || typeof entry.file !== "string") return null;
+              if (!Number.isFinite(entry.line)) return null;
+              return {
+                file: entry.file,
+                line: Number(entry.line),
+                col: Number.isFinite(entry.col) ? Number(entry.col) : 0,
+              };
+            })
+            .filter((entry) => entry !== null);
+        })
+        .filter((chain) => chain.length > 0);
+    }
+
+    function getPreferredLocEntry(parsed, lineNo) {
+      const chains = getLocChainsForLine(parsed, lineNo);
+      if (chains.length > 0 && chains[0].length > 0) {
+        // Prefer innermost frame (leaf) for source jump.
+        return chains[0][0];
+      }
+      const sorted = getSortedLocEntries(parsed, lineNo);
+      return sorted.length > 0 ? sorted[0] : null;
+    }
+
     function parseLocLabel(label) {
       if (typeof label !== "string") return null;
       const match = label.match(/^(.*):(\d+):(\d+)$/);
@@ -1352,9 +1384,29 @@
         return { file, line: meta.line, col: meta.col || 0 };
       }
 
+      function resolveDILocationChain(id) {
+        const chain = [];
+        const visited = new Set();
+        let current = id;
+        let depth = 0;
+        while (typeof current === "string" && /^!\d+$/.test(current)) {
+          if (visited.has(current) || depth > 32) break;
+          visited.add(current);
+          const loc = resolveDILocation(current);
+          if (loc) chain.push(loc);
+          const meta = metaById.get(current);
+          if (!meta || meta.kind !== "!DILocation") break;
+          if (!meta.inlinedAt || !/^!\d+$/.test(meta.inlinedAt)) break;
+          current = meta.inlinedAt;
+          depth += 1;
+        }
+        return chain;
+      }
+
       // ---- Pass 2: process instruction lines for !dbg refs ----
       const lineToSourceLines     = new Map();
       const lineToSourceLocs      = new Map();
+      const lineToSourceLocChains = new Map();
       const sourceLineToCodeLines = new Map();
       const sourceLocToCodeLines  = new Map();
       const lineToDefinedVars     = new Map();
@@ -1369,17 +1421,23 @@
         const codeLineNo = idx + 1;
         const srcLines = new Set();
         const srcLocs  = new Set();
+        const srcLocChains = [];
         let rm;
         dbgRefRe.lastIndex = 0;
         while ((rm = dbgRefRe.exec(line)) !== null) {
-          const loc = resolveDILocation(rm[1]);
-          if (loc && Number.isFinite(loc.line)) {
-            srcLines.add(loc.line);
-            srcLocs.add(`${loc.file}:${loc.line}:${loc.col}`);
+          const chain = resolveDILocationChain(rm[1]);
+          if (chain.length > 0) {
+            srcLocChains.push(chain);
+            for (const loc of chain) {
+              if (!loc || !Number.isFinite(loc.line)) continue;
+              srcLines.add(loc.line);
+              srcLocs.add(`${loc.file}:${loc.line}:${loc.col}`);
+            }
           }
         }
         lineToSourceLines.set(codeLineNo, srcLines);
         lineToSourceLocs.set(codeLineNo, srcLocs);
+        lineToSourceLocChains.set(codeLineNo, srcLocChains);
         for (const srcLineNo of srcLines) {
           if (!sourceLineToCodeLines.has(srcLineNo)) sourceLineToCodeLines.set(srcLineNo, new Set());
           sourceLineToCodeLines.get(srcLineNo).add(codeLineNo);
@@ -1408,6 +1466,7 @@
         lines,
         lineToSourceLines,
         lineToSourceLocs,
+        lineToSourceLocChains,
         sourceLineToCodeLines,
         sourceLocToCodeLines,
         lineToDefinedVars,
@@ -1431,9 +1490,15 @@
       if (!parsed) return;
       // Python source files are their own source — no useful loc tooltip to show
       if (parsed.isPythonSource) { locTooltip.style.display = "none"; return; }
-      const sorted = getSortedLocEntries(parsed, lineNo).map((entry) => `${entry.file}:${entry.line}:${entry.col}`);
-      if (sorted.length === 0) { locTooltip.style.display = "none"; return; }
-      locTooltip.innerHTML = sorted.map((s) => escapeHtml(s)).join("<br>");
+      const chains = getLocChainsForLine(parsed, lineNo);
+      if (chains.length > 0) {
+        const chainRows = chains.map((chain) => chain.map((entry) => `${entry.file}:${entry.line}:${entry.col}`).join(" <- "));
+        locTooltip.innerHTML = chainRows.map((s) => escapeHtml(s)).join("<br>");
+      } else {
+        const sorted = getSortedLocEntries(parsed, lineNo).map((entry) => `${entry.file}:${entry.line}:${entry.col}`);
+        if (sorted.length === 0) { locTooltip.style.display = "none"; return; }
+        locTooltip.innerHTML = sorted.map((s) => escapeHtml(s)).join("<br>");
+      }
       locTooltip.style.display = "block";
       setTooltipPosition(clientX, clientY);
     }
@@ -1487,9 +1552,8 @@
         return;
       }
       if (event.ctrlKey) {
-        const locEntries = getSortedLocEntries(parsed, lineNo);
-        if (locEntries.length > 0) {
-          const target = locEntries[0];
+        const target = getPreferredLocEntry(parsed, lineNo);
+        if (target) {
           vscode.postMessage({
             command: "openSourceLocation",
             file: target.file,
@@ -1530,14 +1594,23 @@
       );
       const source = state.locked || state.hover;
       if (!source) return;
-      const { side, ownPrimaryLineNo, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
+      const { side, ownPrimaryLineNo, sameLocLines, peerLineSet, sameFileRefLines, peerVarRefLines } = source;
 
-      const own = document.querySelector(`.line[data-side="${side}"][data-line-no="${ownPrimaryLineNo}"]`);
-      if (own) own.classList.add("active");
+      // Highlight all lines with the same loc
+      if (sameLocLines && sameLocLines.size > 0) {
+        sameLocLines.forEach((ln) => {
+          const el = document.querySelector(`.line[data-side="${side}"][data-line-no="${ln}"]`);
+          if (el) el.classList.add("active");
+        });
+      } else {
+        // Fallback: highlight just the primary line if no same-loc lines found
+        const own = document.querySelector(`.line[data-side="${side}"][data-line-no="${ownPrimaryLineNo}"]`);
+        if (own) own.classList.add("active");
+      }
 
       if (sameFileRefLines && sameFileRefLines.size > 0) {
         sameFileRefLines.forEach((ln) => {
-          if (ln === ownPrimaryLineNo) return;
+          if (sameLocLines && sameLocLines.has(ln)) return;
           const el = document.querySelector(`.line[data-side="${side}"][data-line-no="${ln}"]`);
           if (el) el.classList.add("var-ref-active");
         });
@@ -1580,6 +1653,31 @@
     function collectImmediateChildLines(parsed, lineNo, excludedLines = new Set()) {
       if (!parsed) return new Set();
       return collectVarRefLinesForDefs(parsed, parsed.lineToDefinedVars.get(lineNo) || [], excludedLines);
+    }
+
+    function collectSameLocLines(parsed, lineNo) {
+      const result = new Set();
+      if (!parsed) return result;
+      
+      const targetLocs = parsed.lineToSourceLocs?.get(lineNo);
+      if (!targetLocs || targetLocs.size === 0) return result;
+      
+      // Collect all lines that share the same loc as the target line
+      parsed.lines.forEach((_, idx) => {
+        const ln = idx + 1;
+        const locs = parsed.lineToSourceLocs?.get(ln);
+        if (!locs || locs.size === 0) return;
+        
+        // Check if any loc matches
+        for (const targetLoc of targetLocs) {
+          if (locs.has(targetLoc)) {
+            result.add(ln);
+            break;
+          }
+        }
+      });
+      
+      return result;
     }
 
     function getPeerMatchesForLine(lineNo, parsed, peerParsed) {
@@ -1666,6 +1764,7 @@
     function buildHighlightState(side, lineNo, parsed, peerParsed) {
       const srcLineSet      = parsed.lineToSourceLines.get(lineNo) || new Set();
       const sameFileRefLines = new Set();
+      const sameLocLines    = collectSameLocLines(parsed, lineNo);
       const peerLineSet     = getPeerMatchesForLine(lineNo, parsed, peerParsed);
       const peerVarRefLines = new Set();
       let   ownPrimaryLineNo = lineNo;
@@ -1695,7 +1794,7 @@
         }
       }
 
-      return { side, lineNo, ownPrimaryLineNo, srcLineSet, peerLineSet, sameFileRefLines, peerVarRefLines };
+      return { side, lineNo, ownPrimaryLineNo, srcLineSet, sameLocLines, peerLineSet, sameFileRefLines, peerVarRefLines };
     }
 
     function autoScrollToTargetPane(side, peerLineSet) {

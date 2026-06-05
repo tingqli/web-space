@@ -16,12 +16,36 @@ A VS Code extension for side-by-side MLIR IR exploration with `loc("file":line:c
 
 ## Enable python call-stack tracing based LOC
 
+Take FlyDSL for example, add following code into your MLIR python binding based source:
+
 ```python
+    # search following code and fix False with True
+    # this will 
+    #   -  add pass to pass loc to llvm ir:  ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}
+    #   - add "-g" to pass gpu-module-to-binary, so assembly has line-number too
+    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
+```
+
+```python
+from flydsl._mlir import ir
+
+def compile(...):
+    ....
     ir._globals.register_traceback_file_inclusion(__file__)
     ir._globals.register_traceback_file_exclusion(r"/root/path/prefix/to/exclude")
     ir._globals.set_loc_tracebacks_frame_limit(40)
     ir._globals.set_loc_tracebacks_enabled(True)
+    ....
+
 ```
+
+Run your test with mlir dumpping:
+
+```bash
+FLYDSL_DUMP_ASM=1 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=dump_ir python3 your_test.py ...
+```
+
+Check folder `dump_ir`, right-click the dump folder of your kernel, choose `MLIR: Open Loc Explorer`.
 
 ## Build
 
