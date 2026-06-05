@@ -40,7 +40,7 @@ This produces a `.vsix` package in the extension root.
 
 ## Publish
 
-1. Create/verify your Visual Studio Marketplace publisher (`ltq18`).
+1. Create/verify your Visual Studio Marketplace publisher (`ltqusst`).
 2. Create a Marketplace PAT under Azure DevOps org `ltq18` (you can start from: https://dev.azure.com/ltq18/_usersSettings/tokens).
 3. Export your Marketplace token in the current shell:
 
